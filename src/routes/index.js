@@ -1,0 +1,25 @@
+import { Router } from 'express';
+import authRoutes from './auth.routes.js';
+import userRoutes from './user.routes.js';
+import orderRoutes from './order.routes.js';
+import invoiceRoutes from './invoice.routes.js';
+import reportRoutes from './report.routes.js';
+import leadRoutes from './lead.routes.js';
+import attendanceRoutes from './attendance.routes.js';
+import companyRoutes from './Company.routes.js';
+import notificationRoutes from './notification.routes.js';
+import platformRoutes from './platform.routes.js';
+
+const router = Router();
+router.get('/health', (_req, res) => res.json({ success: true, status: 'ok', time: new Date().toISOString() }));
+router.use('/auth', authRoutes);
+router.use('/users', userRoutes);
+router.use('/orders', orderRoutes);
+router.use('/invoices', invoiceRoutes);
+router.use('/reports', reportRoutes);
+router.use('/leads', leadRoutes);
+router.use('/attendance', attendanceRoutes);
+router.use('/companies', companyRoutes);
+router.use('/notifications', notificationRoutes);
+router.use('/platform', platformRoutes);
+export default router;
