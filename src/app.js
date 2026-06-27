@@ -12,8 +12,25 @@ import routes from './routes/index.js';
 
 const app = express();
 
+const allowedOrigins = [
+  env.clientUrl,
+  /\.skyupcrmxinvoicesoftwareclient\.pages\.dev$/,
+  'http://localhost:5173',
+];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true); // allow non-browser requests
+    const allowed = allowedOrigins.some((o) =>
+      typeof o === 'string' ? o === origin : o.test(origin)
+    );
+    if (allowed) return callback(null, true);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+}));
+
 app.use(helmet());                                   // secure HTTP headers
-app.use(cors({ origin: env.clientUrl, credentials: true }));
 app.use(express.json({ limit: '1mb' }));             // body size cap
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
