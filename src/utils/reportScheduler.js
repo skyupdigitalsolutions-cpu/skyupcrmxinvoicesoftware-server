@@ -22,13 +22,15 @@ async function tick() {
   const hhmm = nowHHMM();
   const today = todayKey();
 
-  // Load only enabled companies (with smtpPass selected).
+  // Load only enabled companies that have a Brevo key, sender, and recipient configured.
+  // brevoApiKey is select:false — must be explicitly included with the '+' prefix.
   const companies = await Company.find({
     active: true,
     'emailReport.enabled': true,
-    'emailReport.smtpHost': { $ne: '' },
-    'emailReport.adminEmail': { $ne: '' },
-  }).select('+emailReport.smtpPass').lean({ virtuals: false });
+    'emailReport.brevoApiKey': { $nin: [null, ''] },
+    'emailReport.senderEmail': { $nin: [null, ''] },
+    'emailReport.adminEmail':  { $nin: [null, ''] },
+  }).select('+emailReport.brevoApiKey').lean({ virtuals: false });
 
   for (const company of companies) {
     const sendAt = company.emailReport?.sendAt || '08:00';

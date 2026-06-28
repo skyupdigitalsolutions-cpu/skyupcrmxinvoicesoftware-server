@@ -2,7 +2,7 @@ import { Router } from 'express';
 import {
   listCompanies, getCompany, createCompany, updateCompany, deleteCompany,
   createCompanyAdmin, setSubscription, developerStats,
-  setCloudinary, setEmailReport, testEmailReport, setBranding, uploadCompanyLogo,
+  setCloudinary, setEmailReport, testEmailReport, verifyEmailReport, setBranding, uploadCompanyLogo,
 } from '../controllers/Company.controller.js';
 import { protect, developerOnly } from '../middleware/auth.js';
 
@@ -21,6 +21,7 @@ router.patch('/:id/cloudinary', setCloudinary);
 router.patch('/:id/branding', setBranding);
 router.post('/:id/logo', uploadCompanyLogo);
 router.patch('/:id/email-report', setEmailReport);
+router.post('/:id/email-report/verify', verifyEmailReport);
 router.post('/:id/email-report/test', testEmailReport);
 router.delete('/:id', deleteCompany);
 router.post('/:id/admin', createCompanyAdmin);

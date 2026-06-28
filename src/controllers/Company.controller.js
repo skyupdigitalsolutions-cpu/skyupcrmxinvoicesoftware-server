@@ -256,6 +256,24 @@ export const setEmailReport = asyncHandler(async (req, res) => {
   res.json({ success: true, emailReport: company.toSafeJSON().emailReport });
 });
 
+// POST /companies/:id/email-report/verify — validate the Brevo API key lightly
+// (calls GET /account on Brevo; no email is sent, no report is built)
+export const verifyEmailReport = asyncHandler(async (req, res) => {
+  const company = await Company.findById(req.params.id).select('+emailReport.brevoApiKey');
+  if (!company) throw new ApiError(404, 'Company not found');
+
+  const { verifyBrevoApiKey } = await import('../utils/sendEmail.js');
+
+  // Caller may pass a new key in the body (not yet saved) so they can verify
+  // before committing. If no key in body, fall back to the stored one.
+  const keyToTest = String(req.body?.brevoApiKey || '').trim() || company.emailReport?.brevoApiKey;
+  if (!keyToTest) throw new ApiError(400, 'No Brevo API key to verify. Save a key first or provide one in the request body.');
+
+  const result = await verifyBrevoApiKey(keyToTest);
+  if (!result.valid) throw new ApiError(502, result.error || 'Brevo API key is invalid.');
+  res.json({ success: true, email: result.email, plan: result.plan });
+});
+
 // POST /companies/:id/email-report/test — send a test report email right now
 export const testEmailReport = asyncHandler(async (req, res) => {
   const company = await Company.findById(req.params.id).select('+emailReport.brevoApiKey');

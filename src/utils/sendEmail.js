@@ -47,6 +47,34 @@ export async function sendBrevoEmail({ company, to, subject, html }) {
 }
 
 /**
+ * Verify a Brevo API key is valid without sending any email.
+ * Calls Brevo's GET /account endpoint — lightweight, no side effects.
+ *
+ * @param {string} apiKey  – the xkeysib-… key to validate
+ * @returns {{ valid: boolean, email?: string, plan?: string, error?: string }}
+ */
+export async function verifyBrevoApiKey(apiKey) {
+  if (!apiKey?.trim()) return { valid: false, error: 'No API key provided.' };
+  try {
+    const res = await fetch('https://api.brevo.com/v3/account', {
+      headers: { 'api-key': apiKey.trim(), accept: 'application/json' },
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      return { valid: false, error: body?.message || `Brevo rejected the key (HTTP ${res.status}).` };
+    }
+    const data = await res.json();
+    return {
+      valid: true,
+      email: data.email || '',
+      plan: data.plan?.[0]?.type || '',
+    };
+  } catch (err) {
+    return { valid: false, error: err.message || 'Could not reach Brevo API.' };
+  }
+}
+
+/**
  * Send an HTML email with explicit Brevo credentials (not tied to a company's
  * emailReport config). Used for the PLATFORM-wide expiry mailer.
  * @param {Object} opts
