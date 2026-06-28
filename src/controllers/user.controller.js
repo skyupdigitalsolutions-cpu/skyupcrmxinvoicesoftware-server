@@ -132,8 +132,10 @@ export const createUser = asyncHandler(async (req, res) => {
     }
   }
 
+  const { email } = req.body;
   const user = await User.create({
     name, username, password, role, company: companyId,
+    email: email?.toLowerCase().trim() || '',
     clockInLocation: sanitizeClockInLocation(req.body.clockInLocation),
   });
   res.status(201).json({ success: true, user: user.toSafeJSON() });
@@ -156,9 +158,10 @@ export const updateUser = asyncHandler(async (req, res) => {
   const user = await User.findOne({ _id: req.params.id, ...tenantScope(req) }).select('+password');
   if (!user) throw new ApiError(404, 'User not found');
   const { name, password, active } = req.body;
-  if (name !== undefined) user.name = name;
-  if (active !== undefined) user.active = active;
-  if (password) user.password = password; // re-hashed by pre-save hook
+  if (name     !== undefined) user.name   = name;
+  if (active   !== undefined) user.active = active;
+  if (password) user.password = password;
+  if (req.body.email !== undefined) user.email = String(req.body.email || '').toLowerCase().trim();
   if (req.body.clockInLocation !== undefined) {
     user.clockInLocation = sanitizeClockInLocation(req.body.clockInLocation);
   }

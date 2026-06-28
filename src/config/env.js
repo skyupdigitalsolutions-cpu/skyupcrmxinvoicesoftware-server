@@ -19,4 +19,16 @@ export const env = {
     refreshExpires: process.env.JWT_REFRESH_EXPIRES || '7d',
   },
   isProd: process.env.NODE_ENV === 'production',
+
+  // ── Brevo (platform-level) ────────────────────────────────────────────────
+  // Used for system emails: password reset, etc.
+  // Set these in your .env file:
+  //   BREVO_API_KEY       = xkeysib-…
+  //   BREVO_SENDER_EMAIL  = no-reply@yourplatform.com  (must be verified in Brevo)
+  //   BREVO_SENDER_NAME   = Your Platform Name
+  brevo: {
+    apiKey:      process.env.BREVO_API_KEY      || '',
+    senderEmail: process.env.BREVO_SENDER_EMAIL || '',
+    senderName:  process.env.BREVO_SENDER_NAME  || 'CRM Platform',
+  },
 };

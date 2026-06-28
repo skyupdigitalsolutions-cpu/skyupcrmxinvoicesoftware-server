@@ -10,6 +10,11 @@ const userSchema = new mongoose.Schema(
     },
     password: { type: String, required: true, minlength: 6, select: false },
 
+    // Contact email — used for password reset. Optional but required for
+    // forgot-password to work. Not globally unique (multi-tenant: two companies
+    // can have employees with the same email; each gets their own reset link).
+    email: { type: String, default: '', trim: true, lowercase: true, index: true },
+
     // 'developer' = platform super-admin (manages companies + limits, no
     // company of their own). 'admin'/'sales' belong to one company.
     role: { type: String, enum: ['developer', 'admin', 'sales'], default: 'sales', index: true },
@@ -20,9 +25,12 @@ const userSchema = new mongoose.Schema(
     active: { type: Boolean, default: true },
     refreshTokenHash: { type: String, select: false, default: null },
 
-    // Per-employee clock-in location override. When `enabled`, this user must
-    // clock in within the COMPANY radius of (lat,lng) instead of the company's
-    // office geofence. When disabled (default), the company geofence applies.
+    // Password-reset fields — never exposed in API responses (select:false).
+    // Token stored as sha-256 hash of the raw token sent in the email link.
+    passwordResetToken:   { type: String, default: null, select: false },
+    passwordResetExpires: { type: Date,   default: null, select: false },
+
+    // Per-employee clock-in location override.
     clockInLocation: {
       enabled: { type: Boolean, default: false },
       lat:     { type: Number, default: null },
@@ -48,6 +56,7 @@ userSchema.methods.toSafeJSON = function () {
     id: this._id,
     name: this.name,
     username: this.username,
+    email: this.email || '',
     role: this.role,
     company: this.company,
     active: this.active,
