@@ -1,5 +1,9 @@
 import mongoose from 'mongoose';
 
+// Fallback tax rate (fraction, not percent) used only when a company has not
+// configured its own rate. The real rate comes from the tenant's
+// company.branding.taxPercent and is passed into recalc() by the controller,
+// so the stored subTotal/vatAmt/total always match what the PDF prints.
 const VAT_RATE = 0.05;
 
 const invoiceItemSchema = new mongoose.Schema(
@@ -28,6 +32,10 @@ const invoiceSchema = new mongoose.Schema(
     salespersonName: { type: String, default: '' },
     paymentStatus: { type: String, enum: ['Unpaid', 'Partial', 'Paid'], default: 'Unpaid', index: true },
     items: { type: [invoiceItemSchema], default: [] },
+    // Tax rate (as a percent, e.g. 5) actually applied to THIS invoice, captured
+    // at creation time so a later change to the company's default rate never
+    // silently rewrites historical invoices.
+    taxPercent: { type: Number, default: 5, min: 0, max: 100 },
     subTotal: { type: Number, default: 0 },
     vatAmt: { type: Number, default: 0 },
     total: { type: Number, default: 0 },
@@ -40,11 +48,21 @@ const invoiceSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-invoiceSchema.methods.recalc = function () {
+// Recompute the money fields.
+//   taxPercent — the rate as a PERCENT (e.g. 5 for 5%). When omitted, the
+//   invoice's own stored taxPercent is used; if that is missing too, the 5%
+//   fallback applies. The controller passes company.branding.taxPercent here
+//   so the stored total matches the figure printed on the PDF.
+invoiceSchema.methods.recalc = function (taxPercent) {
+  const pct = Number.isFinite(taxPercent)
+    ? taxPercent
+    : (Number.isFinite(this.taxPercent) ? this.taxPercent : VAT_RATE * 100);
+  this.taxPercent = pct;
+  const rate = pct / 100;
   const sub = this.items.reduce((s, it) => s + it.qty * it.price, 0);
   this.subTotal = Number(sub.toFixed(2));
-  this.vatAmt = Number((sub * VAT_RATE).toFixed(2));
-  this.total = Number((sub + this.vatAmt).toFixed(2));
+  this.vatAmt = Number((sub * rate).toFixed(2));
+  this.total = Number((this.subTotal + this.vatAmt).toFixed(2));
 };
 
 export { VAT_RATE };
