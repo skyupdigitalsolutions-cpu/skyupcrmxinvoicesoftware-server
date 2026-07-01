@@ -77,6 +77,13 @@ const resolveBrand = (company) => {
 export function generateInvoicePdf(invoice, company = null) {
   const B = resolveBrand(company);
 
+  // Prefer the rate captured on the invoice at creation time over the company's
+  // *current* default. This keeps a reprinted/regenerated old invoice showing
+  // the rate it was actually billed at, even after the company later changes
+  // its default taxPercent. Legacy invoices with no stored rate fall back to
+  // the company branding value resolved above.
+  if (Number.isFinite(invoice?.taxPercent)) B.taxPercent = invoice.taxPercent;
+
   return new Promise((resolve, reject) => {
     const chunks = [];
     const doc = new PDFDocument({
