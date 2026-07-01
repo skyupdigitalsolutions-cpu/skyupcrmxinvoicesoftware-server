@@ -9,18 +9,38 @@ import { generateInvoicePdf } from '../utils/invoicePdf.js';
 import { uploadPdfToCloudinary, deletePdfFromCloudinary } from '../utils/cloudinary.js';
 import { tenantScope, tenantCompanyId } from '../middleware/auth.js';
 
+// Sales users only ever touch invoices they created; admin/developer see the
+// whole tenant. Applied to reads AND mutations so a salesperson can neither
+// view nor edit another employee's invoice by guessing its id.
 const scopeFor = (req) => {
   const t = tenantScope(req);
   return req.user.role === 'sales' ? { ...t, createdBy: req.user._id } : t;
 };
 
-// Load the tenant company (with branding + currency) for an invoice. The
-// branding/currency fields drive the PDF's header, tax label and amounts so
-// every company's invoice prints its own details.
+// Load the tenant company (branding + currency + Cloudinary secret) for an
+// invoice. apiSecret is select:false, so it must be requested explicitly or
+// per-company Cloudinary uploads silently fall back to the platform account.
 async function companyForInvoice(inv) {
   if (!inv?.company) return null;
-  return Company.findById(inv.company).lean();
+  return Company.findById(inv.company).select('+cloudinary.apiSecret').lean();
 }
+
+// The tax rate (percent) to apply to an invoice, from the company's branding.
+const taxPercentFor = (company) => {
+  const p = company?.branding?.taxPercent;
+  return Number.isFinite(p) ? p : 5;
+};
+
+// Per-company Cloudinary credentials, or null to fall back to the platform
+// (env-var) account. Mirrors the pattern used by uploadCompanyLogo.
+const cloudCredsFor = (company) =>
+  company?.cloudinary?.cloudName
+    ? {
+        cloudName: company.cloudinary.cloudName,
+        apiKey:    company.cloudinary.apiKey,
+        apiSecret: company.cloudinary.apiSecret,
+      }
+    : null;
 
 // Internal helper: generate PDF, upload to Cloudinary, update invoice doc.
 // `company` is the tenant company (loaded by the caller); when omitted it is
@@ -29,10 +49,17 @@ async function attachPdf(inv, company = undefined) {
   try {
     const comp = company !== undefined ? company : await companyForInvoice(inv);
     const buffer = await generateInvoicePdf(inv.toObject ? inv.toObject() : inv, comp);
-    const publicId = `invoices/INV-${inv.invoiceNo}`;
+
+    // Invoice numbers are unique PER COMPANY, so a public id keyed only on the
+    // number (e.g. "INV-1") collides across tenants — with overwrite:true one
+    // company's PDF would clobber another's. Namespace by company id to keep
+    // every tenant's files isolated.
+    const publicId = `${inv.company}/INV-${inv.invoiceNo}`;
+    const creds = cloudCredsFor(comp);
+
     // Remove old file if it exists
-    if (inv.pdfPublicId) await deletePdfFromCloudinary(inv.pdfPublicId);
-    const { url, publicId: storedId } = await uploadPdfToCloudinary(buffer, publicId);
+    if (inv.pdfPublicId) await deletePdfFromCloudinary(inv.pdfPublicId, creds);
+    const { url, publicId: storedId } = await uploadPdfToCloudinary(buffer, publicId, creds);
     inv.pdfUrl = url;
     inv.pdfPublicId = storedId;
     await inv.save();
@@ -56,14 +83,14 @@ export const listInvoices = asyncHandler(async (req, res) => {
 });
 
 export const getInvoice = asyncHandler(async (req, res) => {
-  const inv = await Invoice.findOne({ _id: req.params.id, ...tenantScope(req) });
+  const inv = await Invoice.findOne({ _id: req.params.id, ...scopeFor(req) });
   if (!inv) throw new ApiError(404, 'Invoice not found');
   res.json({ success: true, invoice: inv });
 });
 
 // GET /invoices/:id/pdf  → redirect to Cloudinary URL or stream freshly generated PDF
 export const getInvoicePdf = asyncHandler(async (req, res) => {
-  const inv = await Invoice.findOne({ _id: req.params.id, ...tenantScope(req) });
+  const inv = await Invoice.findOne({ _id: req.params.id, ...scopeFor(req) });
   if (!inv) throw new ApiError(404, 'Invoice not found');
 
   // If we have a stored URL, redirect there
@@ -82,7 +109,7 @@ export const getInvoicePdf = asyncHandler(async (req, res) => {
 
 // POST /invoices/:id/pdf/regenerate  → force regenerate & re-upload
 export const regenerateInvoicePdf = asyncHandler(async (req, res) => {
-  const inv = await Invoice.findOne({ _id: req.params.id, ...tenantScope(req) });
+  const inv = await Invoice.findOne({ _id: req.params.id, ...scopeFor(req) });
   if (!inv) throw new ApiError(404, 'Invoice not found');
   await attachPdf(inv);
   res.json({ success: true, pdfUrl: inv.pdfUrl });
@@ -93,13 +120,19 @@ export const convertOrder = asyncHandler(async (req, res) => {
   const order = await Order.findOne({ _id: req.params.id, ...tenantScope(req) });
   if (!order) throw new ApiError(404, 'Order not found');
   if (order.invoiceId) throw new ApiError(409, 'Order already invoiced');
+  if (order.status === 'Cancelled') throw new ApiError(400, 'Cannot invoice a cancelled order');
   if (req.user.role === 'sales' && String(order.salesperson) !== String(req.user._id)) {
     throw new ApiError(403, 'Not your order');
   }
 
+  const companyId = tenantCompanyId(req);
+  // Load the tenant company once — used for the tax rate (so stored totals
+  // match the PDF) and for the Cloudinary upload credentials.
+  const company = await Company.findById(companyId).select('+cloudinary.apiSecret').lean();
+  const taxPercent = taxPercentFor(company);
+
   const invoice = await runTransactional(async (session) => {
     const opts = session ? { session } : {};
-    const companyId = tenantCompanyId(req);
     const invoiceNo = await Counter.next(`invoiceNo:${companyId}`);
     const [created] = await Invoice.create([{
       company: companyId,
@@ -113,9 +146,10 @@ export const convertOrder = asyncHandler(async (req, res) => {
       mobile: order.mobile,
       salespersonName: order.salespersonName,
       items: order.items,
+      taxPercent,
       createdBy: req.user._id,
     }], opts);
-    created.recalc();
+    created.recalc(taxPercent);
     await created.save(opts);
 
     order.status = 'Invoiced';
@@ -126,27 +160,29 @@ export const convertOrder = asyncHandler(async (req, res) => {
   });
 
   // Generate PDF & upload to Cloudinary (non-blocking for the response)
-  attachPdf(invoice).catch(() => {});
+  attachPdf(invoice, company).catch(() => {});
 
   res.status(201).json({ success: true, invoice });
 });
 
 export const updateInvoiceItems = asyncHandler(async (req, res) => {
-  const inv = await Invoice.findOne({ _id: req.params.id, ...tenantScope(req) });
+  const inv = await Invoice.findOne({ _id: req.params.id, ...scopeFor(req) });
   if (!inv) throw new ApiError(404, 'Invoice not found');
   inv.items = req.body.items;
   inv.updatedBy = req.user._id;
-  inv.recalc();
+
+  const company = await companyForInvoice(inv);
+  inv.recalc(taxPercentFor(company));
   await inv.save();
 
-  // Regenerate PDF in the background
-  attachPdf(inv).catch(() => {});
+  // Regenerate PDF in the background (reuse the loaded company)
+  attachPdf(inv, company).catch(() => {});
 
   res.json({ success: true, invoice: inv });
 });
 
 export const setPaymentStatus = asyncHandler(async (req, res) => {
-  const inv = await Invoice.findOne({ _id: req.params.id, ...tenantScope(req) });
+  const inv = await Invoice.findOne({ _id: req.params.id, ...scopeFor(req) });
   if (!inv) throw new ApiError(404, 'Invoice not found');
   inv.paymentStatus = req.body.paymentStatus;
   inv.updatedBy = req.user._id;
@@ -158,8 +194,11 @@ export const deleteInvoice = asyncHandler(async (req, res) => {
   const inv = await Invoice.findOne({ _id: req.params.id, ...tenantScope(req) });
   if (!inv) throw new ApiError(404, 'Invoice not found');
 
-  // Remove Cloudinary PDF
-  if (inv.pdfPublicId) deletePdfFromCloudinary(inv.pdfPublicId).catch(() => {});
+  // Remove Cloudinary PDF using the company's own credentials.
+  if (inv.pdfPublicId) {
+    const company = await companyForInvoice(inv);
+    deletePdfFromCloudinary(inv.pdfPublicId, cloudCredsFor(company)).catch(() => {});
+  }
 
   await runTransactional(async (session) => {
     const opts = session ? { session } : {};
