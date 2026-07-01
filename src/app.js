@@ -12,6 +12,13 @@ import routes from './routes/index.js';
 
 const app = express();
 
+// Render (and most PaaS hosts) sit behind a reverse proxy, so the client IP
+// arrives in X-Forwarded-For. Without this, express-rate-limit keys every
+// request off the proxy's IP — throttling ALL tenants as one bucket — and
+// emits ERR_ERL_UNEXPECTED_X_FORWARDED_FOR. `1` = trust the single Render hop.
+// It also lets req.secure / secure cookies work correctly behind the proxy.
+app.set('trust proxy', 1);
+
 const allowedOrigins = [
   env.clientUrl,
   /\.skyupcrmxinvoicesoftwareclient\.pages\.dev$/,
