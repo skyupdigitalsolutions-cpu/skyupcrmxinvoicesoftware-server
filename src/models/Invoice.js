@@ -36,6 +36,10 @@ const invoiceSchema = new mongoose.Schema(
     // at creation time so a later change to the company's default rate never
     // silently rewrites historical invoices.
     taxPercent: { type: Number, default: 5, min: 0, max: 100 },
+    // Order-level discount as a PERCENT (0–100), carried over from the source
+    // order at conversion time. VAT is charged on the net (after discount).
+    discount: { type: Number, default: 0, min: 0, max: 100 },
+    discountAmt: { type: Number, default: 0 },
     subTotal: { type: Number, default: 0 },
     vatAmt: { type: Number, default: 0 },
     total: { type: Number, default: 0 },
@@ -59,10 +63,14 @@ invoiceSchema.methods.recalc = function (taxPercent) {
     : (Number.isFinite(this.taxPercent) ? this.taxPercent : VAT_RATE * 100);
   this.taxPercent = pct;
   const rate = pct / 100;
+  const disc = Math.min(100, Math.max(0, Number(this.discount) || 0));
   const sub = this.items.reduce((s, it) => s + it.qty * it.price, 0);
-  this.subTotal = Number(sub.toFixed(2));
-  this.vatAmt = Number((sub * rate).toFixed(2));
-  this.total = Number((this.subTotal + this.vatAmt).toFixed(2));
+  const discountAmt = sub * (disc / 100);
+  const taxable = Math.max(0, sub - discountAmt);   // VAT is charged on the net
+  this.subTotal = Number(sub.toFixed(2));           // gross (sum of line amounts)
+  this.discountAmt = Number(discountAmt.toFixed(2));
+  this.vatAmt = Number((taxable * rate).toFixed(2));
+  this.total = Number((taxable + this.vatAmt).toFixed(2));
 };
 
 export { VAT_RATE };
