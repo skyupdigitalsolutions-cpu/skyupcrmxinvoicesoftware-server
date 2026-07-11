@@ -26,7 +26,7 @@ export const lookupByPhone = asyncHandler(async (req, res) => {
   }
 
   const lead = await Lead.findOne({ mobileKey: key, ...tenantScope(req) }).select(
-    'name mobile country city status interest remark callLogs notes owner ownerName converted orderNo createdAt'
+    'name mobile country city status interest remark delivery callLogs notes owner ownerName converted orderNo createdAt'
   );
 
   if (!lead) return res.json({ success: true, exists: false });
@@ -45,6 +45,7 @@ export const lookupByPhone = asyncHandler(async (req, res) => {
       status: lead.status,
       interest: lead.interest,
       remark: lead.remark,
+      delivery: lead.delivery,
       converted: lead.converted,
       orderNo: lead.orderNo,
       ownerName: lead.ownerName,
@@ -240,6 +241,7 @@ export const convertLead = asyncHandler(async (req, res) => {
     mobile: lead.mobile,
     country: lead.country,
     city: lead.city,
+    delivery: lead.delivery,
     items,
     discount,
     salesperson: lead.owner,
