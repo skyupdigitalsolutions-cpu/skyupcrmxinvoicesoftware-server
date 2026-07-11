@@ -40,7 +40,7 @@ const noteSchema = new mongoose.Schema(
 
 // ── Lead schema ──────────────────────────────────────────────────────────────
 export const LEAD_STATUSES = ['New', 'Contacted', 'Interested', 'Follow-up', 'Won', 'Lost'];
-export const LEAD_SOURCES  = ['Walk-in', 'WhatsApp', 'Instagram', 'Facebook', 'Referral', 'Website', 'Call', 'Other'];
+export const LEAD_SOURCES  = ['Walk-in', 'WhatsApp', 'Instagram', 'Facebook', 'Referral', 'market-in', 'Website', 'Call', 'Other'];
 
 const leadSchema = new mongoose.Schema(
   {
