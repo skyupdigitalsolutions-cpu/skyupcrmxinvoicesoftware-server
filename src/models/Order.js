@@ -56,10 +56,11 @@ const orderSchema = new mongoose.Schema(
 orderSchema.index({ company: 1, orderNo: 1 }, { unique: true });
 
 orderSchema.methods.recalc = function () {
-  this.subTotal = this.items.reduce((s, it) => s + it.qty * it.price, 0);
-  this.grandTotal = Math.max(0, this.subTotal - (this.discount || 0));
-  this.subTotal = Number(this.subTotal.toFixed(2));
-  this.grandTotal = Number(this.grandTotal.toFixed(2));
+  const sub = this.items.reduce((s, it) => s + it.qty * it.price, 0);
+  // `discount` is a PERCENT (0–100), matching the order form and print/preview.
+  const pct = Math.min(100, Math.max(0, Number(this.discount) || 0));
+  this.subTotal = Number(sub.toFixed(2));
+  this.grandTotal = Number(Math.max(0, sub * (1 - pct / 100)).toFixed(2));
 };
 
 export { ORDER_STATUSES };
