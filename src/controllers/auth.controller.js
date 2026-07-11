@@ -64,12 +64,21 @@ export const refresh = asyncHandler(async (req, res) => {
   catch { throw new ApiError(401, 'Invalid refresh token'); }
 
   const user = await User.findById(payload.sub).select('+refreshTokenHash');
-  if (!user || !user.refreshTokenHash) throw new ApiError(401, 'Session expired');
+  if (!user || !user.active || !user.refreshTokenHash) throw new ApiError(401, 'Session expired');
 
   const match = await compareToken(token, user.refreshTokenHash);
   if (!match) throw new ApiError(401, 'Session expired');
 
-  const accessToken = await issueTokens(user, res);
+  // IMPORTANT: do NOT rotate the refresh token here.
+  // Rotating the single stored hash on every refresh makes concurrent refreshes
+  // race — the first rotates the hash, and any other in-flight refresh carrying
+  // the same (still-valid) cookie no longer matches and is force-logged-out.
+  // This fires constantly in practice: React StrictMode double-invokes the
+  // bootstrap effect, multiple open tabs share one cookie, and the 15m access
+  // token triggers frequent refreshes. Keep the same refresh token for its
+  // lifetime; only issue a fresh access token and slide the cookie expiry.
+  const accessToken = signAccessToken(user);
+  res.cookie('refreshToken', token, refreshCookieOptions);
   res.json({ success: true, accessToken, user: await userPayload(user) });
 });
 
