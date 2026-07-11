@@ -119,11 +119,14 @@ export const regenerateInvoicePdf = asyncHandler(async (req, res) => {
 export const convertOrder = asyncHandler(async (req, res) => {
   const order = await Order.findOne({ _id: req.params.id, ...tenantScope(req) });
   if (!order) throw new ApiError(404, 'Order not found');
-  if (order.invoiceId) throw new ApiError(409, 'Order already invoiced');
   if (order.status === 'Cancelled') throw new ApiError(400, 'Cannot invoice a cancelled order');
   if (req.user.role === 'sales' && String(order.salesperson) !== String(req.user._id)) {
     throw new ApiError(403, 'Not your order');
   }
+  // An order may have more than one invoice (e.g. a re-issue with a different
+  // payment status). We no longer block when order.invoiceId is already set;
+  // each conversion mints a fresh invoice number linked to the same order.
+  const isReInvoice = Boolean(order.invoiceId);
 
   const companyId = tenantCompanyId(req);
   // Load the tenant company once — used for the tax rate (so stored totals
@@ -154,8 +157,15 @@ export const convertOrder = asyncHandler(async (req, res) => {
     await created.save(opts);
 
     order.status = 'Invoiced';
-    order.invoiceId = created._id;
-    order.statusHistory.push({ status: 'Invoiced', note: `Invoice #${invoiceNo} generated`, by: req.user._id, byName: req.user.name });
+    order.invoiceId = created._id; // latest invoice for quick reference
+    order.statusHistory.push({
+      status: 'Invoiced',
+      note: isReInvoice
+        ? `Additional invoice #${invoiceNo} generated`
+        : `Invoice #${invoiceNo} generated`,
+      by: req.user._id,
+      byName: req.user.name,
+    });
     await order.save(opts);
     return created;
   });
@@ -201,16 +211,44 @@ export const deleteInvoice = asyncHandler(async (req, res) => {
     deletePdfFromCloudinary(inv.pdfPublicId, cloudCredsFor(company)).catch(() => {});
   }
 
+  let orderReverted = false;
   await runTransactional(async (session) => {
     const opts = session ? { session } : {};
+    await inv.deleteOne(opts);
+
     const order = await Order.findOne({ _id: inv.order, company: inv.company }).session(session || null);
     if (order) {
-      order.status = 'Confirmed';
-      order.invoiceId = null;
-      order.statusHistory.push({ status: 'Confirmed', note: `Invoice #${inv.invoiceNo} deleted`, by: req.user._id, byName: req.user.name });
+      // Any invoices still linked to this order after the delete?
+      const remaining = await Invoice.find({ order: inv.order, company: inv.company })
+        .sort({ createdAt: -1 })
+        .session(session || null);
+
+      if (remaining.length) {
+        // Other invoices exist — stay Invoiced, just repoint to the newest.
+        order.invoiceId = remaining[0]._id;
+        order.statusHistory.push({
+          status: order.status,
+          note: `Invoice #${inv.invoiceNo} deleted (${remaining.length} invoice${remaining.length === 1 ? '' : 's'} remaining)`,
+          by: req.user._id, byName: req.user.name,
+        });
+      } else {
+        // Last invoice removed — revert the order so it can be worked again.
+        order.status = 'Confirmed';
+        order.invoiceId = null;
+        order.statusHistory.push({
+          status: 'Confirmed',
+          note: `Invoice #${inv.invoiceNo} deleted`,
+          by: req.user._id, byName: req.user.name,
+        });
+        orderReverted = true;
+      }
       await order.save(opts);
     }
-    await inv.deleteOne(opts);
   });
-  res.json({ success: true, message: 'Invoice deleted, order reverted to Confirmed' });
+  res.json({
+    success: true,
+    message: orderReverted
+      ? 'Invoice deleted, order reverted to Confirmed.'
+      : 'Invoice deleted. The order still has other invoices.',
+  });
 });
