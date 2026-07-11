@@ -258,6 +258,8 @@ export function generateInvoicePdf(invoice, company = null) {
     const items = invoice.items || [];
     let subtotal = 0;
     const taxRate = B.taxPercent / 100;
+    // Order-level discount (percent) carried from the source order.
+    const disc = Math.min(100, Math.max(0, Number(invoice.discount) || 0));
 
     items.forEach((item, idx) => {
       const amount = (item.qty || 0) * (item.price || 0);
@@ -276,20 +278,31 @@ export function generateInvoicePdf(invoice, company = null) {
 
       text(`${(item.price || 0).toFixed(2)}`, colX[3] + 2, y + 8, { size: 8, width: cols[3].w - 4, align: 'right' });
       text('CTN', colX[4] + 2, y + 8, { size: 7, width: cols[4].w - 4, align: 'center' });
+      if (disc > 0) text(`${disc} %`, colX[5] + 2, y + 8, { size: 7.5, width: cols[5].w - 4, align: 'center' });
       boldText(`${amount.toFixed(2)}`, colX[6] + 2, y + 8, { size: 8, width: cols[6].w - 4, align: 'right' });
       text(`${B.taxPercent} %`, colX[7] + 2, y + 8, { size: 7.5, width: cols[7].w - 4, align: 'center' });
 
       y += rowH;
     });
 
-    // ── Subtotal + tax rows ───────────────────────────────────────────────────
-    const tax = Number((subtotal * taxRate).toFixed(2));
-    const total = Number((subtotal + tax).toFixed(2));
+    // ── Subtotal + discount + tax rows ────────────────────────────────────────
+    const discountAmt = Number((subtotal * disc / 100).toFixed(2));
+    const taxable = Math.max(0, Number((subtotal - discountAmt).toFixed(2)));
+    const tax = Number((taxable * taxRate).toFixed(2));
+    const total = Number((taxable + tax).toFixed(2));
 
     rect(M, y, innerW, rowH, null, '#000');
     cols.forEach((c, i) => rect(colX[i], y, c.w, rowH, null, '#000'));
     boldText(`${subtotal.toFixed(2)}`, colX[6] + 2, y + 8, { size: 9, width: cols[6].w - 4, align: 'right' });
     y += rowH;
+
+    if (disc > 0) {
+      rect(M, y, innerW, rowH, null, '#000');
+      cols.forEach((c, i) => rect(colX[i], y, c.w, rowH, null, '#000'));
+      boldText(`Less : Discount ${disc}%`, colX[1] + 3, y + 8, { size: 8 });
+      boldText(`-${discountAmt.toFixed(2)}`, colX[6] + 2, y + 8, { size: 9, width: cols[6].w - 4, align: 'right' });
+      y += rowH;
+    }
 
     rect(M, y, innerW, rowH, null, '#000');
     cols.forEach((c, i) => rect(colX[i], y, c.w, rowH, null, '#000'));
@@ -297,7 +310,10 @@ export function generateInvoicePdf(invoice, company = null) {
     boldText(`${tax.toFixed(2)}`, colX[6] + 2, y + 8, { size: 9, width: cols[6].w - 4, align: 'right' });
     y += rowH;
 
-    for (let i = 0; i < 4; i++) {
+    // Blank filler rows — one fewer when the discount row consumed a slot, so
+    // the total-row position (and overall table height) stays fixed.
+    const fillerRows = disc > 0 ? 3 : 4;
+    for (let i = 0; i < fillerRows; i++) {
       rect(M, y, innerW, rowH, null, '#000');
       cols.forEach((c, ci) => rect(colX[ci], y, c.w, rowH, null, '#000'));
       y += rowH;
@@ -331,11 +347,11 @@ export function generateInvoicePdf(invoice, company = null) {
     boldText('Tax Amount', rx2 + 105, y + 4, { size: 7 });
     line(M + innerW * 0.55, y + 14, W - M, y + 14, '#000', 0.5);
     text(`${B.taxPercent} %`, rx2, y + 17, { size: 7.5 });
-    text(`${subtotal.toFixed(2)}`, rx2 + 38, y + 17, { size: 7.5 });
+    text(`${taxable.toFixed(2)}`, rx2 + 38, y + 17, { size: 7.5 });
     boldText(`${tax.toFixed(2)}`, rx2 + 105, y + 17, { size: 7.5 });
     line(M + innerW * 0.55, y + 28, W - M, y + 28, '#000', 0.5);
     boldText('Total', rx2 + 10, y + 31, { size: 7.5 });
-    text(`${subtotal.toFixed(2)}`, rx2 + 38, y + 31, { size: 7.5 });
+    text(`${taxable.toFixed(2)}`, rx2 + 38, y + 31, { size: 7.5 });
     boldText(`${tax.toFixed(2)}`, rx2 + 105, y + 31, { size: 7.5 });
 
     y += wordsH;
