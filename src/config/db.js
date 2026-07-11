@@ -9,7 +9,10 @@ export const connectDB = async () => {
   try {
     mongoose.set('strictQuery', true);
     const conn = await mongoose.connect(uri, { serverSelectionTimeoutMS: 10000 });
-    console.log(`✓ MongoDB connected: ${conn.connection.host}`);
+    // Log the DATABASE NAME as well as the host. If this name differs from the
+    // one you seeded into, that's why logins fail with "wrong username or
+    // password" — the users live in a different database on the same cluster.
+    console.log(`✓ MongoDB connected: host=${conn.connection.host} db="${conn.connection.name}"`);
   } catch (err) {
     console.error('✗ MongoDB connection error:', err.message);
     process.exit(1);
