@@ -147,6 +147,7 @@ export const convertOrder = asyncHandler(async (req, res) => {
       salespersonName: order.salespersonName,
       items: order.items,
       taxPercent,
+      discount: order.discount || 0,
       createdBy: req.user._id,
     }], opts);
     created.recalc(taxPercent);
