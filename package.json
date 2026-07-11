@@ -7,8 +7,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "seed": "node src/utils/seed.js",
-    "seed:dev": "node src/utils/seedDeveloper.js"
+    "seed": "node src/utils/seed.js"
   },
   "dependencies": {
     "@getbrevo/brevo": "^2.2.0",
