@@ -16,3 +16,4 @@ export const authLimiter = rateLimit({
   legacyHeaders: false,
   message: { success: false, message: 'Too many login attempts. Try again later.' },
 });
+

@@ -21,3 +21,4 @@ counterSchema.statics.ensure = async function (name, value) {
 };
 
 export const Counter = mongoose.model('Counter', counterSchema);
+

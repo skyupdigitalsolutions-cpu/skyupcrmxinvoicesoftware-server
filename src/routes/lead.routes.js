@@ -42,3 +42,4 @@ router.post('/:id/convert', convertLead);
 router.delete('/:id', authorize('admin'), deleteLead);
 
 export default router;
+

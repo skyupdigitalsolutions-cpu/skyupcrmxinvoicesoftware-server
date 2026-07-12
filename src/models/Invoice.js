@@ -77,3 +77,4 @@ export { VAT_RATE };
 invoiceSchema.index({ company: 1, invoiceNo: 1 }, { unique: true });
 
 export const Invoice = mongoose.model('Invoice', invoiceSchema);
+

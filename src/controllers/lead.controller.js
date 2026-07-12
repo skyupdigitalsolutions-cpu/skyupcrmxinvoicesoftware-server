@@ -267,3 +267,4 @@ export const deleteLead = asyncHandler(async (req, res) => {
   await lead.deleteOne();
   res.json({ success: true, message: 'Lead deleted' });
 });
+

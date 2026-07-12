@@ -1,32 +1,32 @@
 import mongoose from 'mongoose';
 
-const orderItemSchema = new mongoose.Schema(
-  {
+const orderItemSchema = new mongoose.Schema({
     modelCode: { type: String, required: true, trim: true },
     description: { type: String, trim: true, default: '' },
     unit: { type: String, default: 'PAIR' },
     brand: { type: String, trim: true, default: '' },
     qty: { type: Number, required: true, min: 0, default: 1 },
     price: { type: Number, required: true, min: 0, default: 0 },
-  },
-  { _id: false }
-);
+}, { _id: false });
 
-const statusHistorySchema = new mongoose.Schema(
-  {
+const statusHistorySchema = new mongoose.Schema({
     status: String,
     note: { type: String, default: '' },
     by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     byName: String,
     at: { type: Date, default: Date.now },
-  },
-  { _id: false }
-);
+}, { _id: false });
 
 const ORDER_STATUSES = ['Pending', 'Confirmed', 'Packed', 'Market Delay', 'Shipped', 'Out for Delivery', 'Delivered', 'Invoiced', 'Cancelled'];
 
-const orderSchema = new mongoose.Schema(
-  {
+// Every stage that remains updatable even after an order has been invoiced
+// (order.status stays 'Invoiced'; these are tracked separately in
+// `deliveryStatus` so the Delivery Tracker keeps working post-invoice).
+// Excludes 'Invoiced' (that's the order's own status) and 'Cancelled' (an
+// invoiced order shouldn't be marked cancelled from the tracker).
+const DELIVERY_STATUSES = ['Pending', 'Confirmed', 'Market Delay', 'Packed', 'Shipped', 'Out for Delivery', 'Delivered'];
+
+const orderSchema = new mongoose.Schema({
     company: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true, index: true },
     orderNo: { type: Number, required: true, index: true },
     date: { type: Date, required: true, default: Date.now },
@@ -44,24 +44,26 @@ const orderSchema = new mongoose.Schema(
     subTotal: { type: Number, default: 0 },
     grandTotal: { type: Number, default: 0 },
     status: { type: String, enum: ORDER_STATUSES, default: 'Pending', index: true },
+    // Once an order is Invoiced, `status` stays 'Invoiced' (so edit/delete/
+    // re-invoice guards keep working). Delivery progress after that point is
+    // tracked separately here, so the Delivery Tracker stays updatable.
+    deliveryStatus: { type: String, enum: ['', ...DELIVERY_STATUSES], default: '' },
     statusHistory: { type: [statusHistorySchema], default: [] },
     notes: { type: String, default: '' },
     invoiceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Invoice', default: null },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-  },
-  { timestamps: true }
-);
+}, { timestamps: true });
 
 // Order numbers are unique PER COMPANY (each tenant has its own sequence).
 orderSchema.index({ company: 1, orderNo: 1 }, { unique: true });
 
-orderSchema.methods.recalc = function () {
-  const sub = this.items.reduce((s, it) => s + it.qty * it.price, 0);
-  // `discount` is a PERCENT (0–100), matching the order form and print/preview.
-  const pct = Math.min(100, Math.max(0, Number(this.discount) || 0));
-  this.subTotal = Number(sub.toFixed(2));
-  this.grandTotal = Number(Math.max(0, sub * (1 - pct / 100)).toFixed(2));
+orderSchema.methods.recalc = function() {
+    const sub = this.items.reduce((s, it) => s + it.qty * it.price, 0);
+    // `discount` is a PERCENT (0–100), matching the order form and print/preview.
+    const pct = Math.min(100, Math.max(0, Number(this.discount) || 0));
+    this.subTotal = Number(sub.toFixed(2));
+    this.grandTotal = Number(Math.max(0, sub * (1 - pct / 100)).toFixed(2));
 };
 
-export { ORDER_STATUSES };
+export { ORDER_STATUSES, DELIVERY_STATUSES };
 export const Order = mongoose.model('Order', orderSchema);

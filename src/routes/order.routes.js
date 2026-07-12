@@ -15,3 +15,4 @@ router.put('/:id', validate(updateOrderSchema), updateOrder);
 router.patch('/:id/status', validate(statusSchema), updateStatus);
 router.delete('/:id', authorize('admin'), validate(idParam), deleteOrder);
 export default router;
+

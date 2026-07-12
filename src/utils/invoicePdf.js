@@ -374,3 +374,4 @@ export function generateInvoicePdf(invoice, company = null) {
     doc.end();
   });
 }
+

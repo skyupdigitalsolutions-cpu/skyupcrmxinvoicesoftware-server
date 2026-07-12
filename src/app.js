@@ -20,29 +20,29 @@ const app = express();
 app.set('trust proxy', 1);
 
 const allowedOrigins = [
-  env.clientUrl,
-  /\.skyupcrmxinvoicesoftwareclient\.pages\.dev$/,
-  'http://localhost:5173',
+    env.clientUrl,
+    /\.skyupcrmxinvoicesoftwareclient\.pages\.dev$/,
+    'http://localhost:5173',
 ];
 
 app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin) return callback(null, true); // allow non-browser requests
-    const allowed = allowedOrigins.some((o) =>
-      typeof o === 'string' ? o === origin : o.test(origin)
-    );
-    if (allowed) return callback(null, true);
-    return callback(new Error('Not allowed by CORS'));
-  },
-  credentials: true,
+    origin: (origin, callback) => {
+        if (!origin) return callback(null, true); // allow non-browser requests
+        const allowed = allowedOrigins.some((o) =>
+            typeof o === 'string' ? o === origin : o.test(origin)
+        );
+        if (allowed) return callback(null, true);
+        return callback(new Error('Not allowed by CORS'));
+    },
+    credentials: true,
 }));
 
-app.use(helmet());                                   // secure HTTP headers
-app.use(express.json({ limit: '1mb' }));             // body size cap
+app.use(helmet()); // secure HTTP headers
+app.use(express.json({ limit: '6mb' })); // body size cap (base64 logo uploads need headroom)
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
-app.use(mongoSanitize());                            // strip $ / . from inputs (NoSQL injection)
-app.use(hpp());                                      // HTTP param pollution
+app.use(mongoSanitize()); // strip $ / . from inputs (NoSQL injection)
+app.use(hpp()); // HTTP param pollution
 if (!env.isProd) app.use(morgan('dev'));
 app.use('/api', apiLimiter);
 

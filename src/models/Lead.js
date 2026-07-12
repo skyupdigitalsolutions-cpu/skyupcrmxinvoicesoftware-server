@@ -85,3 +85,4 @@ leadSchema.pre('save', function (next) {
 leadSchema.index({ company: 1, mobileKey: 1 });
 
 export const Lead = mongoose.model('Lead', leadSchema);
+
