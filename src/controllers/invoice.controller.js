@@ -34,8 +34,7 @@ const taxPercentFor = (company) => {
 // Per-company Cloudinary credentials, or null to fall back to the platform
 // (env-var) account. Mirrors the pattern used by uploadCompanyLogo.
 const cloudCredsFor = (company) =>
-    company && company.cloudinary && company.cloudinary.cloudName ?
-    {
+    company && company.cloudinary && company.cloudinary.cloudName ? {
         cloudName: company.cloudinary.cloudName,
         apiKey: company.cloudinary.apiKey,
         apiSecret: company.cloudinary.apiSecret,
@@ -45,28 +44,31 @@ const cloudCredsFor = (company) =>
 // Internal helper: generate PDF, upload to Cloudinary, update invoice doc.
 // `company` is the tenant company (loaded by the caller); when omitted it is
 // fetched from the invoice so the PDF is always company-specific.
+//
+// IMPORTANT: this throws on failure. Callers that want a non-blocking,
+// best-effort attempt (e.g. right after creating/editing an invoice) must
+// wrap the call in `.catch(...)` themselves — see convertOrder /
+// updateInvoiceItems below. Callers that represent an explicit user action
+// (e.g. the "Regenerate PDF" button) must let the error propagate so the
+// client finds out the upload actually failed, instead of getting a false
+// "success" response while the Cloudinary credentials are silently wrong.
 async function attachPdf(inv, company = undefined) {
-    try {
-        const comp = company !== undefined ? company : await companyForInvoice(inv);
-        const buffer = await generateInvoicePdf(inv.toObject ? inv.toObject() : inv, comp);
+    const comp = company !== undefined ? company : await companyForInvoice(inv);
+    const buffer = await generateInvoicePdf(inv.toObject ? inv.toObject() : inv, comp);
 
-        // Invoice numbers are unique PER COMPANY, so a public id keyed only on the
-        // number (e.g. "INV-1") collides across tenants — with overwrite:true one
-        // company's PDF would clobber another's. Namespace by company id to keep
-        // every tenant's files isolated.
-        const publicId = `${inv.company}/INV-${inv.invoiceNo}`;
-        const creds = cloudCredsFor(comp);
+    // Invoice numbers are unique PER COMPANY, so a public id keyed only on the
+    // number (e.g. "INV-1") collides across tenants — with overwrite:true one
+    // company's PDF would clobber another's. Namespace by company id to keep
+    // every tenant's files isolated.
+    const publicId = `${inv.company}/INV-${inv.invoiceNo}`;
+    const creds = cloudCredsFor(comp);
 
-        // Remove old file if it exists
-        if (inv.pdfPublicId) await deletePdfFromCloudinary(inv.pdfPublicId, creds);
-        const { url, publicId: storedId } = await uploadPdfToCloudinary(buffer, publicId, creds);
-        inv.pdfUrl = url;
-        inv.pdfPublicId = storedId;
-        await inv.save();
-    } catch (err) {
-        console.error('[invoice] PDF generation/upload failed:', err.message);
-        // Non-fatal — invoice is still created/updated; PDF can be regenerated
-    }
+    // Remove old file if it exists
+    if (inv.pdfPublicId) await deletePdfFromCloudinary(inv.pdfPublicId, creds);
+    const { url, publicId: storedId } = await uploadPdfToCloudinary(buffer, publicId, creds);
+    inv.pdfUrl = url;
+    inv.pdfPublicId = storedId;
+    await inv.save();
 }
 
 export const listInvoices = asyncHandler(async(req, res) => {
@@ -111,7 +113,12 @@ export const getInvoicePdf = asyncHandler(async(req, res) => {
 export const regenerateInvoicePdf = asyncHandler(async(req, res) => {
     const inv = await Invoice.findOne({ _id: req.params.id, ...scopeFor(req) });
     if (!inv) throw new ApiError(404, 'Invoice not found');
-    await attachPdf(inv);
+    try {
+        await attachPdf(inv);
+    } catch (err) {
+        console.error(`[invoice] Regenerate PDF failed for invoice ${inv._id} (INV-${inv.invoiceNo}):`, err.message);
+        throw new ApiError(502, `Could not save the PDF to Cloudinary: ${err.message}`);
+    }
     res.json({ success: true, pdfUrl: inv.pdfUrl });
 });
 
@@ -167,8 +174,7 @@ export const convertOrder = asyncHandler(async(req, res) => {
         order.statusHistory.push({
             status: 'Invoiced',
             note: isReInvoice ?
-                `Additional invoice #${invoiceNo} generated` :
-                `Invoice #${invoiceNo} generated`,
+                `Additional invoice #${invoiceNo} generated` : `Invoice #${invoiceNo} generated`,
             by: req.user._id,
             byName: req.user.name,
         });
@@ -177,7 +183,9 @@ export const convertOrder = asyncHandler(async(req, res) => {
     });
 
     // Generate PDF & upload to Cloudinary (non-blocking for the response)
-    attachPdf(invoice, company).catch(() => {});
+    attachPdf(invoice, company).catch((err) =>
+        console.error(`[invoice] Background PDF upload failed for invoice ${invoice._id} (INV-${invoice.invoiceNo}):`, err.message)
+    );
 
     res.status(201).json({ success: true, invoice });
 });
@@ -193,7 +201,9 @@ export const updateInvoiceItems = asyncHandler(async(req, res) => {
     await inv.save();
 
     // Regenerate PDF in the background (reuse the loaded company)
-    attachPdf(inv, company).catch(() => {});
+    attachPdf(inv, company).catch((err) =>
+        console.error(`[invoice] Background PDF upload failed for invoice ${inv._id} (INV-${inv.invoiceNo}):`, err.message)
+    );
 
     res.json({ success: true, invoice: inv });
 });
@@ -257,7 +267,6 @@ export const deleteInvoice = asyncHandler(async(req, res) => {
     res.json({
         success: true,
         message: orderReverted ?
-            'Invoice deleted, order reverted to Confirmed.' :
-            'Invoice deleted. The order still has other invoices.',
+            'Invoice deleted, order reverted to Confirmed.' : 'Invoice deleted. The order still has other invoices.',
     });
 });
