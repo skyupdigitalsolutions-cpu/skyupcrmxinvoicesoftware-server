@@ -13,13 +13,14 @@ import { env } from '../config/env.js';
 // ── 1. Per-company sender (daily report) ──────────────────────────────────────
 export async function sendBrevoEmail({ company, to, subject, html }) {
     try {
-        const cfg = company ? .emailReport || {};
-        if (!cfg.brevoApiKey) { console.warn(`[email] No Brevo key for ${company?.name}; skipping.`); return false; }
-        if (!cfg.senderEmail) { console.warn(`[email] No sender email for ${company?.name}; skipping.`); return false; }
+        const cfg = (company && company.emailReport) || {};
+        const companyName = company && company.name;
+        if (!cfg.brevoApiKey) { console.warn(`[email] No Brevo key for ${companyName}; skipping.`); return false; }
+        if (!cfg.senderEmail) { console.warn(`[email] No sender email for ${companyName}; skipping.`); return false; }
 
         const recipients = (Array.isArray(to) ? to : [to]).filter(Boolean);
         const finalTo = recipients.length ? recipients : (cfg.adminEmail ? [cfg.adminEmail] : []);
-        if (!finalTo.length) { console.warn(`[email] No recipient for ${company?.name}; skipping.`); return false; }
+        if (!finalTo.length) { console.warn(`[email] No recipient for ${companyName}; skipping.`); return false; }
 
         const apiInstance = new brevo.TransactionalEmailsApi();
         apiInstance.authentications['apiKey'].apiKey = cfg.brevoApiKey;
@@ -33,7 +34,8 @@ export async function sendBrevoEmail({ company, to, subject, html }) {
         await apiInstance.sendTransacEmail(msg);
         return true;
     } catch (err) {
-        console.error(`[email] send failed for ${company?.name}:`, err.message);
+        const companyName = company && company.name;
+        console.error(`[email] send failed for ${companyName}:`, err.message);
         return false;
     }
 }
@@ -66,17 +68,18 @@ export async function sendBrevoEmailRaw({ apiKey, senderEmail, senderName, to, b
 
 // ── 3. Verify a Brevo API key (no email sent) ─────────────────────────────────
 export async function verifyBrevoApiKey(apiKey) {
-    if (!apiKey ? .trim()) return { valid: false, error: 'No API key provided.' };
+    if (!apiKey || !apiKey.trim()) return { valid: false, error: 'No API key provided.' };
     try {
         const res = await fetch('https://api.brevo.com/v3/account', {
             headers: { 'api-key': apiKey.trim(), accept: 'application/json' },
         });
         if (!res.ok) {
             const body = await res.json().catch(() => ({}));
-            return { valid: false, error: body ? .message || `Brevo rejected the key (HTTP ${res.status}).` };
+            return { valid: false, error: (body && body.message) || `Brevo rejected the key (HTTP ${res.status}).` };
         }
         const data = await res.json();
-        return { valid: true, email: data.email || '', plan: data.plan ? .[0] ? .type || '' };
+        const plan = data.plan && data.plan[0] ? data.plan[0].type : '';
+        return { valid: true, email: data.email || '', plan: plan || '' };
     } catch (err) {
         return { valid: false, error: err.message || 'Could not reach Brevo API.' };
     }
