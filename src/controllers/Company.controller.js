@@ -217,10 +217,9 @@ export const uploadCompanyLogo = asyncHandler(async(req, res) => {
         throw new ApiError(400, 'A valid base64 image (data:image/...) is required.');
     }
     // Guard size (~2MB of base64 ≈ 1.5MB image).
-    if (image.length > 5_000_000) throw new ApiError(413, 'Image too large. Please use a smaller image.');
+    if (image.length > 3_000_000) throw new ApiError(413, 'Image too large. Please use an image under ~1.5MB.');
 
-    const creds = company.cloudinary ?.cloudName ?
-        { cloudName: company.cloudinary.cloudName, apiKey: company.cloudinary.apiKey, apiSecret: company.cloudinary.apiSecret } :
+    const creds = company.cloudinary ?.cloudName ? { cloudName: company.cloudinary.cloudName, apiKey: company.cloudinary.apiKey, apiSecret: company.cloudinary.apiSecret } :
         null;
 
     let result;
@@ -280,20 +279,27 @@ export const testEmailReport = asyncHandler(async(req, res) => {
     const company = await Company.findById(req.params.id).select('+emailReport.brevoApiKey');
     if (!company) throw new ApiError(404, 'Company not found');
 
-    if (!company.emailReport ?.brevoApiKey) {
+    const er = company.emailReport || {};
+    if (!er.brevoApiKey) {
         throw new ApiError(400, 'Brevo API key must be configured before sending a test.');
     }
-    if (!company.emailReport ?.adminEmail) {
+    if (!er.adminEmail) {
         throw new ApiError(400, 'Admin recipient email must be configured before sending a test.');
     }
-    if (!company.emailReport ?.senderEmail) {
+    if (!er.senderEmail) {
         throw new ApiError(400, 'Sender email must be configured before sending a test.');
     }
 
     const { sendDailyReport } = await
     import ('../utils/dailyReportEmail.js');
-    await sendDailyReport(company, new Date());
-    res.json({ success: true, message: `Test report sent to ${company.emailReport.adminEmail}` });
+    try {
+        await sendDailyReport(company, new Date());
+    } catch (err) {
+        // Surface the real reason (bad key, unverified sender, Brevo quota, etc.)
+        // as a proper 502 instead of letting it fall through as an opaque 500.
+        throw new ApiError(502, err.message || 'Failed to send the test report email.');
+    }
+    res.json({ success: true, message: `Test report sent to ${er.adminEmail}` });
 });
 
 // POST /companies/:id/admin — provision a company's first admin

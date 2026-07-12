@@ -2,6 +2,7 @@ import { asyncHandler } from '../utils/asyncHandler.js';
 import { ApiError } from '../utils/ApiError.js';
 import { Attendance } from '../models/Attendance.js';
 import { AttendanceConfig } from '../models/AttendanceConfig.js';
+import { LocationPing } from '../models/LocationPing.js';
 import { tenantScope, tenantCompanyId } from '../middleware/auth.js';
 import { User } from '../models/User.js';
 
@@ -83,16 +84,13 @@ export const clockIn = asyncHandler(async(req, res) => {
     const usingEmployeeLoc = !!(emp.enabled && emp.lat != null && emp.lng != null);
     const companyRadius = (cfg.office && cfg.office.radiusMeters) || 100;
 
-    const fence = usingEmployeeLoc ?
-        { lat: emp.lat, lng: emp.lng, radiusMeters: companyRadius, label: emp.label || 'your assigned location' } :
-        (cfg.office && cfg.office.enabled && cfg.office.lat != null && cfg.office.lng != null) ?
-        { lat: cfg.office.lat, lng: cfg.office.lng, radiusMeters: cfg.office.radiusMeters, label: 'the office' } :
+    const fence = usingEmployeeLoc ? { lat: emp.lat, lng: emp.lng, radiusMeters: companyRadius, label: emp.label || 'your assigned location' } :
+        (cfg.office && cfg.office.enabled && cfg.office.lat != null && cfg.office.lng != null) ? { lat: cfg.office.lat, lng: cfg.office.lng, radiusMeters: cfg.office.radiusMeters, label: 'the office' } :
         null;
 
     const body = req.body || {};
     const hasCoords = typeof body.lat === 'number' && typeof body.lng === 'number';
-    const capturedLoc = hasCoords ?
-        { lat: body.lat, lng: body.lng, accuracy: typeof body.accuracy === 'number' ? body.accuracy : null, at: new Date() } :
+    const capturedLoc = hasCoords ? { lat: body.lat, lng: body.lng, accuracy: typeof body.accuracy === 'number' ? body.accuracy : null, at: new Date() } :
         null;
 
     if (fence) {
@@ -213,9 +211,7 @@ export const getReport = asyncHandler(async(req, res) => {
         (req.query.company || null) :
         req.user.company;
 
-    const userQuery = req.user.role === 'sales' ?
-        { _id: req.user._id } :
-        {...(companyId ? { company: companyId } : {}), role: 'sales' }; // admins are not tracked in attendance
+    const userQuery = req.user.role === 'sales' ? { _id: req.user._id } : {...(companyId ? { company: companyId } : {}), role: 'sales' }; // admins are not tracked in attendance
     const users = await User.find(userQuery).select('name username role active');
     const userIds = users.map((u) => String(u._id));
 
@@ -235,8 +231,7 @@ export const getReport = asyncHandler(async(req, res) => {
 
     // Use the company's config; fall back to defaults when developer views "all".
     const cfg = companyId ?
-        await AttendanceConfig.getForCompany(companyId) :
-        { lateAfterMinutes: 570, halfDayMinMinutes: 240, fullDayMinMinutes: 480, weeklyOffDays: [0], holidays: [], office: {} };
+        await AttendanceConfig.getForCompany(companyId) : { lateAfterMinutes: 570, halfDayMinMinutes: 240, fullDayMinMinutes: 480, weeklyOffDays: [0], holidays: [], office: {} };
     let enriched = records.map((r) => enrich(r, cfg));
 
     // Synthetic "absent" rows for users with no record, single-day view only
@@ -267,9 +262,7 @@ export const getReport = asyncHandler(async(req, res) => {
 });
 
 export const listAttendanceUsers = asyncHandler(async(req, res) => {
-    const userQuery = req.user.role === 'sales' ?
-        { _id: req.user._id } :
-        {...tenantScope(req), active: true, role: 'sales' }; // admins excluded from attendance
+    const userQuery = req.user.role === 'sales' ? { _id: req.user._id } : {...tenantScope(req), active: true, role: 'sales' }; // admins excluded from attendance
     const users = await User.find(userQuery).select('name username').sort({ name: 1 });
     res.json({ success: true, users });
 });
@@ -365,4 +358,92 @@ export const saveConfig = asyncHandler(async(req, res) => {
     const companyId = tenantCompanyId(req);
     const cfg = await AttendanceConfig.findOneAndUpdate({ company: companyId }, { $set: update, $setOnInsert: { company: companyId } }, { new: true, upsert: true, setDefaultsOnInsert: true });
     res.json({ success: true, config: cfg });
+});
+
+// ── Live-location tracking ──────────────────────────────────────────────────
+
+// Resolve the geofence that applies to a user: their own clock-in location if
+// set, else the company office. Returns null when neither is configured.
+const resolveFence = (user, cfg) => {
+    const emp = user.clockInLocation || {};
+    if (emp.enabled && emp.lat != null && emp.lng != null) {
+        return { lat: emp.lat, lng: emp.lng, radiusMeters: (cfg.office && cfg.office.radiusMeters) || 100 };
+    }
+    if (cfg.office && cfg.office.enabled && cfg.office.lat != null && cfg.office.lng != null) {
+        return { lat: cfg.office.lat, lng: cfg.office.lng, radiusMeters: cfg.office.radiusMeters || 100 };
+    }
+    return null;
+};
+
+// GET /attendance/tracking — the current user's tracking rule, so their app
+// knows whether (and how often) to send location pings.
+export const getTrackingConfig = asyncHandler(async(req, res) => {
+    const t = req.user.locationTracking || {};
+    res.json({
+        success: true,
+        tracking: { enabled: !!t.enabled, intervalMinutes: t.intervalMinutes || 30 },
+    });
+});
+
+// POST /attendance/location — record one live-location ping (device coords),
+// flagged inside/outside the user's geofence.
+export const recordLocation = asyncHandler(async(req, res) => {
+    const body = req.body || {};
+    if (typeof body.lat !== 'number' || typeof body.lng !== 'number') {
+        throw new ApiError(400, 'lat/lng required');
+    }
+    const companyId = tenantCompanyId(req);
+    if (!companyId) throw new ApiError(400, 'Location tracking is only available inside a company account.');
+
+    const cfg = await AttendanceConfig.getForCompany(companyId);
+    const fence = resolveFence(req.user, cfg);
+
+    let insideFence = null;
+    let distanceMeters = null;
+    if (fence) {
+        distanceMeters = Math.round(haversineMeters(body.lat, body.lng, fence.lat, fence.lng));
+        insideFence = distanceMeters <= fence.radiusMeters;
+    }
+
+    const ping = await LocationPing.create({
+        company: companyId,
+        user: req.user._id,
+        date: todayStr(),
+        lat: body.lat,
+        lng: body.lng,
+        accuracy: typeof body.accuracy === 'number' ? body.accuracy : null,
+        insideFence,
+        distanceMeters,
+        at: new Date(),
+    });
+
+    res.status(201).json({ success: true, ping: { insideFence, distanceMeters, at: ping.at } });
+});
+
+// GET /attendance/location/:userId?date=YYYY-MM-DD — admin: a user's day trail.
+export const getUserLocations = asyncHandler(async(req, res) => {
+    const { userId } = req.params;
+    if (!/^[0-9a-fA-F]{24}$/.test(String(userId))) throw new ApiError(400, 'Invalid user id');
+    const date = req.query.date || todayStr();
+
+    const target = await User.findOne({ _id: userId, ...tenantScope(req) }).select('name company');
+    if (!target) throw new ApiError(404, 'User not found');
+
+    const pings = await LocationPing.find({ user: userId, company: target.company, date })
+        .sort({ at: 1 })
+        .lean();
+
+    res.json({
+        success: true,
+        user: { id: target._id, name: target.name },
+        date,
+        pings: pings.map((p) => ({
+            lat: p.lat,
+            lng: p.lng,
+            accuracy: p.accuracy,
+            insideFence: p.insideFence,
+            distanceMeters: p.distanceMeters,
+            at: p.at,
+        })),
+    });
 });

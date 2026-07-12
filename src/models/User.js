@@ -51,6 +51,14 @@ const userSchema = new mongoose.Schema({
         lng: { type: Number, default: null },
         label: { type: String, default: '', trim: true, maxlength: 80 },
     },
+
+    // Admin-set live-location tracking rule. When enabled, the employee's app
+    // sends a location ping every `intervalMinutes` while clocked in (web app:
+    // only while the tab is open; true background needs the native app).
+    locationTracking: {
+        enabled: { type: Boolean, default: false },
+        intervalMinutes: { type: Number, enum: [15, 30, 60], default: 30 },
+    },
 }, { timestamps: true });
 
 userSchema.pre('save', async function(next) {
@@ -79,6 +87,10 @@ userSchema.methods.toSafeJSON = function() {
             lat: loc.lat != null ? loc.lat : null,
             lng: loc.lng != null ? loc.lng : null,
             label: loc.label || '',
+        },
+        locationTracking: {
+            enabled: !!(this.locationTracking && this.locationTracking.enabled),
+            intervalMinutes: (this.locationTracking && this.locationTracking.intervalMinutes) || 30,
         },
     };
 };

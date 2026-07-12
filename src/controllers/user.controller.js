@@ -94,16 +94,14 @@ export const getUserDetail = asyncHandler(async(req, res) => {
         user: user.toSafeJSON(),
         createdAt: user.createdAt,
         working,
-        attendance: att ?
-            {
-                status: att.status,
-                loginTime: att.loginTime,
-                logoutTime: att.logoutTime,
-                totalWorkMinutes: att.totalWorkMinutes || 0,
-                totalBreakMinutes: att.totalBreakMinutes || 0,
-                onBreak: (att.breaks || []).some((b) => !b.endTime),
-            } :
-            null,
+        attendance: att ? {
+            status: att.status,
+            loginTime: att.loginTime,
+            logoutTime: att.logoutTime,
+            totalWorkMinutes: att.totalWorkMinutes || 0,
+            totalBreakMinutes: att.totalBreakMinutes || 0,
+            onBreak: (att.breaks || []).some((b) => !b.endTime),
+        } : null,
         stats: {
             orders: o.n,
             revenue: Number((o.revenue || 0).toFixed(2)),
@@ -148,6 +146,7 @@ export const createUser = asyncHandler(async(req, res) => {
         company: companyId,
         email: email ? email.toLowerCase().trim() : '',
         clockInLocation: sanitizeClockInLocation(req.body.clockInLocation),
+        locationTracking: sanitizeTracking(req.body.locationTracking),
     });
     res.status(201).json({ success: true, user: user.toSafeJSON() });
 });
@@ -165,6 +164,15 @@ function sanitizeClockInLocation(loc) {
     };
 }
 
+// Whitelist + coerce the per-employee live-location tracking rule.
+function sanitizeTracking(t) {
+    if (!t || typeof t !== 'object') return undefined;
+    const allowed = [15, 30, 60];
+    let interval = Number(t.intervalMinutes);
+    if (allowed.indexOf(interval) === -1) interval = 30;
+    return { enabled: !!t.enabled, intervalMinutes: interval };
+}
+
 export const updateUser = asyncHandler(async(req, res) => {
     const user = await User.findOne({ _id: req.params.id, ...tenantScope(req) }).select('+password');
     if (!user) throw new ApiError(404, 'User not found');
@@ -175,6 +183,9 @@ export const updateUser = asyncHandler(async(req, res) => {
     if (req.body.email !== undefined) user.email = String(req.body.email || '').toLowerCase().trim();
     if (req.body.clockInLocation !== undefined) {
         user.clockInLocation = sanitizeClockInLocation(req.body.clockInLocation);
+    }
+    if (req.body.locationTracking !== undefined) {
+        user.locationTracking = sanitizeTracking(req.body.locationTracking);
     }
     await user.save();
     res.json({ success: true, user: user.toSafeJSON() });

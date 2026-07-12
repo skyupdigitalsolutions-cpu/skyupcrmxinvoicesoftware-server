@@ -1,13 +1,30 @@
 import { Router } from 'express';
 import {
-  clockIn, clockOut, startBreak, endBreak, getMyToday,
-  getReport, listAttendanceUsers, upsertAttendance, updateAttendance, deleteAttendance,
-  getConfig, saveConfig,
+    clockIn,
+    clockOut,
+    startBreak,
+    endBreak,
+    getMyToday,
+    getReport,
+    listAttendanceUsers,
+    upsertAttendance,
+    updateAttendance,
+    deleteAttendance,
+    getConfig,
+    saveConfig,
+    getTrackingConfig,
+    recordLocation,
+    getUserLocations,
 } from '../controllers/attendance.controller.js';
 import { protect, authorize } from '../middleware/auth.js';
 import { validate } from '../middleware/validate.js';
 import {
-  attendanceReportQuery, attendanceUpsertSchema, attendanceUpdateSchema, attendanceConfigSchema, startBreakSchema, idParam,
+    attendanceReportQuery,
+    attendanceUpsertSchema,
+    attendanceUpdateSchema,
+    attendanceConfigSchema,
+    startBreakSchema,
+    idParam,
 } from '../validators/schemas.js';
 
 const router = Router();
@@ -19,6 +36,11 @@ router.post('/clock-out', clockOut);
 router.post('/break/start', validate(startBreakSchema), startBreak);
 router.post('/break/end', endBreak);
 router.get('/my-today', getMyToday);
+
+// Live-location tracking
+router.get('/tracking', getTrackingConfig); // current user's rule
+router.post('/location', recordLocation); // employee sends a ping
+router.get('/location/:userId', authorize('admin'), getUserLocations); // admin views trail
 
 // Attendance management table — admin sees everyone, sales sees only themselves
 router.get('/report', validate(attendanceReportQuery), getReport);
