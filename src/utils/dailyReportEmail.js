@@ -72,8 +72,10 @@ async function buildReportPdf(company, date, data) {
             doc.fillColor(gray).fontSize(8).font('Helvetica')
                 .text(c.label, cx + 8, cy + 30, { width: cardW - 16 });
             cx += cardW + 10;
-            if (i === 2) { cx = 40;
-                cy += 56; }
+            if (i === 2) {
+                cx = 40;
+                cy += 56;
+            }
         });
 
         doc.y = cy + 60;
@@ -131,8 +133,10 @@ async function buildReportPdf(company, date, data) {
             data.leads.slice(0, 40).forEach((l) => {
                 tableRow([l.name, l.mobile || '—', l.source, l.assignedUserName || '—', l.status], lw, doc.y);
                 doc.moveDown(0.55);
-                if (doc.y > doc.page.height - 60) { doc.addPage();
-                    doc.y = 40; }
+                if (doc.y > doc.page.height - 60) {
+                    doc.addPage();
+                    doc.y = 40;
+                }
             });
         }
 
@@ -243,7 +247,7 @@ export async function sendDailyReport(company, date = new Date()) {
 
     // ── Initialise the Brevo API client with this company's key ────────────────
     const apiInstance = new brevo.TransactionalEmailsApi();
-    apiInstance.authentications['api-key'].apiKey = cfg.brevoApiKey;
+    apiInstance.authentications['apiKey'].apiKey = cfg.brevoApiKey;
 
     // ── Build the send request ─────────────────────────────────────────────────
     const sendSmtpEmail = new brevo.SendSmtpEmail();
