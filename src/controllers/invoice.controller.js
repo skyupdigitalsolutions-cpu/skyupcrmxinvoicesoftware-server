@@ -60,7 +60,7 @@ async function attachPdf(inv, company = undefined) {
     // number (e.g. "INV-1") collides across tenants — with overwrite:true one
     // company's PDF would clobber another's. Namespace by company id to keep
     // every tenant's files isolated.
-    const publicId = `${inv.company}/INV-${inv.invoiceNo}`;
+    const publicId = `${inv.company}/INV-${inv.invoiceNo}.pdf`;
     const creds = cloudCredsFor(comp);
 
     // Remove old file if it exists
@@ -90,20 +90,20 @@ export const getInvoice = asyncHandler(async(req, res) => {
     res.json({ success: true, invoice: inv });
 });
 
-// GET /invoices/:id/pdf  → redirect to Cloudinary URL or stream freshly generated PDF
+// GET /invoices/:id/pdf  → stream a freshly generated PDF as a proper download.
+// We stream from our own server (rather than redirecting to the Cloudinary raw
+// URL) so the file always arrives as application/pdf with a real ".pdf"
+// filename — the raw Cloudinary URL was serving an extension-less file that the
+// browser saved as "INV-4" and refused to open as a PDF.
 export const getInvoicePdf = asyncHandler(async(req, res) => {
     const inv = await Invoice.findOne({ _id: req.params.id, ...scopeFor(req) });
     if (!inv) throw new ApiError(404, 'Invoice not found');
 
-    // If we have a stored URL, redirect there
-    if (inv.pdfUrl) return res.redirect(302, inv.pdfUrl);
-
-    // Otherwise generate on the fly and stream
     const company = await companyForInvoice(inv);
     const buffer = await generateInvoicePdf(inv.toObject(), company);
     res.set({
         'Content-Type': 'application/pdf',
-        'Content-Disposition': `inline; filename="INV-${inv.invoiceNo}.pdf"`,
+        'Content-Disposition': `attachment; filename="INV-${inv.invoiceNo}.pdf"`,
         'Content-Length': buffer.length,
     });
     res.send(buffer);
