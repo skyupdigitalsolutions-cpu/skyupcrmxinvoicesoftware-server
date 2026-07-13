@@ -8,8 +8,8 @@ import { uploadImageToCloudinary } from '../utils/cloudinary.js';
 // Whitelist + coerce branding fields so callers can't inject arbitrary keys.
 const BRANDING_STR_FIELDS = [
     'headerName', 'headerTagline', 'logoUrl', 'receiptHeading', 'cardsHeading',
-    'legalName', 'addressLine1', 'addressLine2', 'city', 'phone', 'email',
-    'website', 'trn', 'taxLabel', 'footerNote', 'declaration',
+    'legalName', 'legalNameAr', 'addressLine1', 'addressLine2', 'addressAr',
+    'city', 'phone', 'email', 'website', 'trn', 'taxLabel', 'footerNote', 'declaration',
 ];
 const sanitizeBranding = (b = {}) => {
     const out = {};
