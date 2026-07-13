@@ -35,7 +35,7 @@ const orderSchema = new mongoose.Schema({
     country: { type: String, default: 'UAE', index: true },
     mobile: { type: String, default: '' },
     delivery: { type: String, default: '' },
-    payTerms: { type: String, default: 'CASH TRANSFER' },
+    payTerms: { type: String, default: 'Cash on Delivery' },
     salesperson: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
     salespersonName: { type: String, default: '' },
     items: { type: [orderItemSchema], default: [] },

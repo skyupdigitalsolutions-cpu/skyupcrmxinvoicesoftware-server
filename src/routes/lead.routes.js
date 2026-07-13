@@ -1,15 +1,16 @@
 import { Router } from 'express';
 import {
-  lookupByPhone,
-  listLeads,
-  getLead,
-  createLead,
-  updateLead,
-  setLeadStatus,
-  logCall,
-  addNote,
-  convertLead,
-  deleteLead,
+    lookupByPhone,
+    listLeads,
+    getLead,
+    createLead,
+    updateLead,
+    setLeadStatus,
+    logCall,
+    addNote,
+    convertLead,
+    deleteLead,
+    listDeletedContacts,
 } from '../controllers/lead.controller.js';
 import { protect, authorize } from '../middleware/auth.js';
 
@@ -22,9 +23,13 @@ router.use(protect);
 // Must be declared BEFORE /:id to avoid being caught by the param route
 router.get('/lookup', lookupByPhone);
 
+// ── Deleted contacts report (admin only) ─────────────────────────────────────
+// Two-segment path, declared before /:id so it isn't caught by the param route.
+router.get('/deleted/report', authorize('admin'), listDeletedContacts);
+
 // ── CRUD ──────────────────────────────────────────────────────────────────────
-router.get('/',    listLeads);
-router.post('/',   createLead);
+router.get('/', listLeads);
+router.post('/', createLead);
 router.get('/:id', getLead);
 router.put('/:id', updateLead);
 
@@ -42,4 +47,3 @@ router.post('/:id/convert', convertLead);
 router.delete('/:id', authorize('admin'), deleteLead);
 
 export default router;
-

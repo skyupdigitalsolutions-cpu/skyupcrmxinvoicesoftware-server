@@ -1,6 +1,7 @@
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { ApiError } from '../utils/ApiError.js';
 import { Order, DELIVERY_STATUSES } from '../models/Order.js';
+import { normalizePhone } from '../models/Lead.js';
 import { User } from '../models/User.js';
 import { Counter } from '../models/Counter.js';
 import { tenantScope, tenantCompanyId } from '../middleware/auth.js';
@@ -23,9 +24,11 @@ export const listOrders = asyncHandler(async(req, res) => {
     if (from || to) {
         q.date = {};
         if (from) q.date.$gte = new Date(from);
-        if (to) { const d = new Date(to);
+        if (to) {
+            const d = new Date(to);
             d.setHours(23, 59, 59, 999);
-            q.date.$lte = d; }
+            q.date.$lte = d;
+        }
     }
     if (search) {
         const rx = new RegExp(String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
@@ -43,6 +46,55 @@ export const getOrder = asyncHandler(async(req, res) => {
     res.json({ success: true, order });
 });
 
+// ── Customer lookup (read-only) ──────────────────────────────────────────────
+// While creating an order, fetch a customer's saved delivery details from their
+// most recent existing order in this company. Matches by normalised mobile
+// first (most reliable), then falls back to an exact-ish name match. Company-
+// scoped so one tenant never reads another's customer records.
+export const customerLookup = asyncHandler(async(req, res) => {
+    const name = (req.query.name || '').trim();
+    const mobile = (req.query.mobile || '').trim();
+    const country = req.query.country || 'UAE';
+
+    if (!name && !mobile) return res.json({ success: true, found: false });
+
+    const scope = tenantScope(req);
+    let order = null;
+
+    // 1) Match by phone number (normalised, matching the Lead dedup logic).
+    if (mobile) {
+        const key = normalizePhone(mobile, country);
+        if (key && key.replace(/\D/g, '').length >= 5) {
+            order = await Order.findOne({...scope, mobile: { $regex: mobile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } })
+                .sort({ createdAt: -1 })
+                .lean();
+        }
+    }
+
+    // 2) Fall back to a case-insensitive customer-name match.
+    if (!order && name) {
+        const rx = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+        order = await Order.findOne({...scope, customer: rx })
+            .sort({ createdAt: -1 })
+            .lean();
+    }
+
+    if (!order) return res.json({ success: true, found: false });
+
+    res.json({
+        success: true,
+        found: true,
+        customer: {
+            customer: order.customer || '',
+            mobile: order.mobile || '',
+            city: order.city || '',
+            country: order.country || 'UAE',
+            delivery: order.delivery || '',
+            payTerms: order.payTerms || '',
+        },
+    });
+});
+
 export const createOrder = asyncHandler(async(req, res) => {
     const body = req.body;
     const companyId = tenantCompanyId(req);
@@ -50,12 +102,16 @@ export const createOrder = asyncHandler(async(req, res) => {
 
     let spId = body.salesperson;
     let spName = '';
-    if (req.user.role === 'sales') { spId = req.user._id;
-        spName = req.user.name; } else if (spId) {
+    if (req.user.role === 'sales') {
+        spId = req.user._id;
+        spName = req.user.name;
+    } else if (spId) {
         // Salesperson must belong to this company — never assign across tenants.
         const sp = await User.findOne({ _id: spId, company: companyId });
-        if (!sp) { spId = req.user._id;
-            spName = req.user.name; } else spName = sp.name;
+        if (!sp) {
+            spId = req.user._id;
+            spName = req.user.name;
+        } else spName = sp.name;
     }
 
     const order = new Order({

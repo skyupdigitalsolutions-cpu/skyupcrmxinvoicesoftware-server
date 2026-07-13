@@ -7,6 +7,14 @@ import { AttendanceConfig } from '../models/AttendanceConfig.js';
 import { User } from '../models/User.js';
 import { tenantScope, tenantCompanyId } from '../middleware/auth.js';
 
+// A lead counts as a "buyer"/conversion once it is marked Won OR has been
+// converted into an order. convertLead sets BOTH, but a lead can also be marked
+// Won manually (without an order), so both conditions must be checked. Using
+// only `converted` (as the dashboard previously did) made the Buyers stat and
+// the Buyers-over-time chart under-report and disagree with the Won status
+// count / pipeline on the same page. This is the single source of truth.
+const isBuyer = (l) => l.status === 'Won' || l.converted === true;
+
 const buildRange = (period, from, to) => {
     const now = new Date();
     let start, end = new Date();
@@ -144,7 +152,7 @@ export const dashboard = asyncHandler(async(req, res) => {
         if (leadByStatus[l.status] !== undefined) leadByStatus[l.status] += 1;
         if (leadBySource[l.source] !== undefined) leadBySource[l.source] += 1;
         if (l.campaign) campaigns.add(l.campaign.trim().toLowerCase());
-        if (l.converted) buyers += 1;
+        if (isBuyer(l)) buyers += 1;
     });
 
     // Drop zero-count sources so the bars only show real channels.
@@ -159,7 +167,7 @@ export const dashboard = asyncHandler(async(req, res) => {
     leads.forEach((l) => {
         const created = idx[keyOf(l.createdAt)];
         if (created !== undefined) newSeries[created] += 1;
-        if (l.converted) {
+        if (isBuyer(l)) {
             const conv = idx[keyOf(l.updatedAt)];
             if (conv !== undefined) convSeries[conv] += 1;
         }
@@ -172,7 +180,7 @@ export const dashboard = asyncHandler(async(req, res) => {
         const name = l.ownerName || '—';
         empMap[name] = empMap[name] || { name, leads: 0, converted: 0 };
         empMap[name].leads += 1;
-        if (l.converted) empMap[name].converted += 1;
+        if (isBuyer(l)) empMap[name].converted += 1;
     });
     const topEmployees = Object.values(empMap).sort((a, b) => b.leads - a.leads).slice(0, 6);
 
@@ -340,7 +348,7 @@ export const dailyReport = asyncHandler(async(req, res) => {
 
     const count = (arr, pred) => arr.filter(pred).length;
     const total = dayLeads.length;
-    const converted = count(dayLeads, (l) => l.status === 'Won' || l.converted);
+    const converted = count(dayLeads, (l) => isBuyer(l));
     const contacted = count(dayLeads, (l) => isContacted(l.status));
     const inProgress = count(dayLeads, (l) => isInProgress(l.status));
     const notInterested = count(dayLeads, (l) => l.status === 'Lost');
@@ -348,7 +356,7 @@ export const dailyReport = asyncHandler(async(req, res) => {
     const unassigned = count(dayLeads, (l) => !l.owner);
 
     const prevTotal = prevLeads.length;
-    const prevConverted = count(prevLeads, (l) => l.status === 'Won' || l.converted);
+    const prevConverted = count(prevLeads, (l) => isBuyer(l));
 
     const callsToday = dayLeads.reduce(
         (s, l) => s + (l.callLogs || []).filter((c) => new Date(c.at) >= start && new Date(c.at) <= end).length, 0
@@ -367,7 +375,7 @@ export const dailyReport = asyncHandler(async(req, res) => {
         empMap[name].leads += 1;
         empMap[name].callsToday += (l.callLogs || []).filter((c) => new Date(c.at) >= start && new Date(c.at) <= end).length;
         if (isInProgress(l.status)) empMap[name].inProgress += 1;
-        if (l.status === 'Won' || l.converted) empMap[name].converted += 1;
+        if (isBuyer(l)) empMap[name].converted += 1;
     });
 
     // Fold in attendance so every active user shows up even with zero lead
@@ -524,7 +532,7 @@ export const dailyReport = asyncHandler(async(req, res) => {
         deliveries,
         followUps,
         conversions: dayLeads
-            .filter((l) => l.status === 'Won' || l.converted)
+            .filter((l) => isBuyer(l))
             .map((l) => ({ _id: l._id, name: l.name, campaign: l.campaign, assignedUserName: l.ownerName, source: l.source })),
     });
 });

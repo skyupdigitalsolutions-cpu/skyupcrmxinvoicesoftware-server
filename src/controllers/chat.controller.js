@@ -2,6 +2,7 @@ import { asyncHandler } from '../utils/asyncHandler.js';
 import { ApiError } from '../utils/ApiError.js';
 import { Message } from '../models/Message.js';
 import { User } from '../models/User.js';
+import { notifyUsers } from '../utils/notify.js';
 
 // Chat is company-scoped; the developer account (no company) can't use it.
 const companyOf = (req) => {
@@ -110,6 +111,19 @@ export const sendMessage = asyncHandler(async(req, res) => {
     if (body.length > 4000) throw new ApiError(400, 'Message is too long.');
 
     const msg = await Message.create({ company: companyId, from: req.user._id, to: other._id, body });
+
+    // Notify the recipient of the new message so it shows in their bell. The
+    // preview is trimmed; failures never block the send (notifyUsers swallows).
+    const preview = body.length > 90 ? `${body.slice(0, 90)}…` : body;
+    await notifyUsers({
+        company: companyId,
+        recipients: other._id,
+        type: 'chat-message',
+        title: `New message from ${req.user.name}`,
+        body: preview,
+        link: '/chat',
+    });
+
     res.status(201).json({
         success: true,
         message: { id: msg._id, body: msg.body, at: msg.createdAt, fromMe: true, readAt: null },
