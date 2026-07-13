@@ -8,7 +8,53 @@
  *  3. sendPasswordResetEmail – platform system email using BREVO_* env vars
  */
 import * as brevo from '@getbrevo/brevo';
+import nodemailer from 'nodemailer';
 import { env } from '../config/env.js';
+
+// ── SMTP (Nodemailer) helpers — per-company daily report ─────────────────────
+// Provider-agnostic: works with Gmail, Zoho, Outlook, or any SMTP server. Each
+// company stores its own SMTP credentials in company.emailReport.
+//
+// cfg shape: { host, port, secure, user, pass }
+
+export function createSmtpTransport(cfg) {
+    const port = Number(cfg && cfg.port) || 587;
+    return nodemailer.createTransport({
+        host: cfg && cfg.host,
+        port,
+        // secure=true for port 465 (implicit TLS); false uses STARTTLS (587).
+        secure: cfg && cfg.secure !== undefined ? !!cfg.secure : port === 465,
+        auth: { user: cfg && cfg.user, pass: cfg && cfg.pass },
+    });
+}
+
+// Verify SMTP credentials/connection without sending an email.
+export async function verifySmtpConfig(cfg) {
+    if (!cfg || !cfg.host) return { valid: false, error: 'SMTP host is required (e.g. smtp.gmail.com).' };
+    if (!cfg.user || !cfg.pass) return { valid: false, error: 'SMTP username and password are required.' };
+    try {
+        const transport = createSmtpTransport(cfg);
+        await transport.verify();
+        return { valid: true };
+    } catch (err) {
+        return { valid: false, error: (err && err.message) || 'Could not connect to the SMTP server.' };
+    }
+}
+
+// Send an email through a given SMTP config. Attachments use nodemailer's
+// { filename, content: <Buffer> } shape.
+export async function sendMailViaSmtp({ smtp, from, to, bcc, subject, html, attachments }) {
+    const transport = createSmtpTransport(smtp);
+    const recipients = (Array.isArray(to) ? to : [to]).filter(Boolean);
+    return transport.sendMail({
+        from,
+        to: recipients,
+        bcc: bcc || undefined,
+        subject,
+        html,
+        attachments: attachments || undefined,
+    });
+}
 
 // ── 1. Per-company sender (daily report) ──────────────────────────────────────
 export async function sendBrevoEmail({ company, to, subject, html }) {

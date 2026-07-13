@@ -43,7 +43,7 @@ export const listCompanies = asyncHandler(async(_req, res) => {
 
 // GET /companies/:id
 export const getCompany = asyncHandler(async(req, res) => {
-    const company = await Company.findById(req.params.id).select('+cloudinary.apiSecret +emailReport.brevoApiKey');
+    const company = await Company.findById(req.params.id).select('+cloudinary.apiSecret +emailReport.smtpPass');
     if (!company) throw new ApiError(404, 'Company not found');
     const safe = company.toSafeJSON();
     res.json({ success: true, company: {...safe, usage: await usageFor(company._id) } });
@@ -239,49 +239,64 @@ export const setEmailReport = asyncHandler(async(req, res) => {
     const company = await Company.findById(req.params.id);
     if (!company) throw new ApiError(404, 'Company not found');
 
-    const { enabled, adminEmail, senderEmail, senderName, brevoApiKey, sendAt } = req.body || {};
+    const { enabled, adminEmail, senderEmail, senderName, sendAt,
+        smtpHost, smtpPort, smtpSecure, smtpUser, smtpPass } = req.body || {};
     if (!company.emailReport) company.emailReport = {};
     if (enabled !== undefined) company.emailReport.enabled = !!enabled;
     if (adminEmail !== undefined) company.emailReport.adminEmail = String(adminEmail).trim().toLowerCase();
     if (senderEmail !== undefined) company.emailReport.senderEmail = String(senderEmail).trim().toLowerCase();
     if (senderName !== undefined) company.emailReport.senderName = String(senderName).trim();
     if (sendAt !== undefined) company.emailReport.sendAt = String(sendAt).trim();
-    // Only overwrite the key if a non-empty value was submitted (blank = keep existing)
-    if (brevoApiKey !== undefined && String(brevoApiKey).trim() !== '') {
-        company.emailReport.brevoApiKey = String(brevoApiKey).trim();
+    if (smtpHost !== undefined) company.emailReport.smtpHost = String(smtpHost).trim();
+    if (smtpPort !== undefined) company.emailReport.smtpPort = Number(smtpPort) || 587;
+    if (smtpSecure !== undefined) company.emailReport.smtpSecure = !!smtpSecure;
+    if (smtpUser !== undefined) company.emailReport.smtpUser = String(smtpUser).trim();
+    // Only overwrite the password if a non-empty value was submitted (blank = keep existing)
+    if (smtpPass !== undefined && String(smtpPass).trim() !== '') {
+        company.emailReport.smtpPass = String(smtpPass).trim();
     }
 
     await company.save();
     res.json({ success: true, emailReport: company.toSafeJSON().emailReport });
 });
 
-// POST /companies/:id/email-report/verify — validate the Brevo API key lightly
-// (calls GET /account on Brevo; no email is sent, no report is built)
+// POST /companies/:id/email-report/verify — check the SMTP connection/credentials
+// (connects and authenticates; no email is sent, no report is built)
 export const verifyEmailReport = asyncHandler(async(req, res) => {
-    const company = await Company.findById(req.params.id).select('+emailReport.brevoApiKey');
+    const company = await Company.findById(req.params.id).select('+emailReport.smtpPass');
     if (!company) throw new ApiError(404, 'Company not found');
 
-    const { verifyBrevoApiKey } = await
-    import ('../utils/sendEmail.js');
+    const { verifySmtpConfig } = await import('../utils/sendEmail.js');
+    const er = company.emailReport || {};
+    const body = req.body || {};
 
-    // Caller may pass a new key in the body (not yet saved) so they can verify
-    // before committing. If no key in body, fall back to the stored one.
-    const keyToTest = String(req.body ?.brevoApiKey || '').trim() || company.emailReport ?.brevoApiKey;
-    if (!keyToTest) throw new ApiError(400, 'No Brevo API key to verify. Save a key first or provide one in the request body.');
+    // Caller may pass new SMTP values in the body (not yet saved) so they can
+    // verify before committing. Fall back to the stored values otherwise.
+    const cfg = {
+        host: (body.smtpHost !== undefined ? String(body.smtpHost) : er.smtpHost || '').trim(),
+        port: body.smtpPort !== undefined ? Number(body.smtpPort) : (er.smtpPort || 587),
+        secure: body.smtpSecure !== undefined ? !!body.smtpSecure : !!er.smtpSecure,
+        user: (body.smtpUser !== undefined ? String(body.smtpUser) : er.smtpUser || '').trim(),
+        pass: (body.smtpPass !== undefined && String(body.smtpPass).trim() !== '')
+            ? String(body.smtpPass).trim()
+            : (er.smtpPass || ''),
+    };
+    if (!cfg.host) throw new ApiError(400, 'Enter an SMTP host (e.g. smtp.gmail.com).');
+    if (!cfg.user || !cfg.pass) throw new ApiError(400, 'Enter the SMTP username and password. Save a password first or provide one to verify.');
 
-    const result = await verifyBrevoApiKey(keyToTest);
-    if (!result.valid) throw new ApiError(502, result.error || 'Brevo API key is invalid.');
-    res.json({ success: true, email: result.email, plan: result.plan });
+    const result = await verifySmtpConfig(cfg);
+    if (!result.valid) throw new ApiError(502, result.error || 'SMTP connection failed.');
+    res.json({ success: true, message: 'SMTP connection verified.' });
 });
 
 // POST /companies/:id/email-report/test — send a test report email right now
 export const testEmailReport = asyncHandler(async(req, res) => {
-    const company = await Company.findById(req.params.id).select('+emailReport.brevoApiKey');
+    const company = await Company.findById(req.params.id).select('+emailReport.smtpPass');
     if (!company) throw new ApiError(404, 'Company not found');
 
     const er = company.emailReport || {};
-    if (!er.brevoApiKey) {
-        throw new ApiError(400, 'Brevo API key must be configured before sending a test.');
+    if (!er.smtpHost || !er.smtpUser || !er.smtpPass) {
+        throw new ApiError(400, 'SMTP host, username and password must be configured before sending a test.');
     }
     if (!er.adminEmail) {
         throw new ApiError(400, 'Admin recipient email must be configured before sending a test.');
@@ -290,13 +305,12 @@ export const testEmailReport = asyncHandler(async(req, res) => {
         throw new ApiError(400, 'Sender email must be configured before sending a test.');
     }
 
-    const { sendDailyReport } = await
-    import ('../utils/dailyReportEmail.js');
+    const { sendDailyReport } = await import('../utils/dailyReportEmail.js');
     try {
         await sendDailyReport(company, new Date());
     } catch (err) {
-        // Surface the real reason (bad key, unverified sender, Brevo quota, etc.)
-        // as a proper 502 instead of letting it fall through as an opaque 500.
+        // Surface the real reason (bad password, blocked login, wrong host/port)
+        // as a proper 502 instead of an opaque 500.
         throw new ApiError(502, err.message || 'Failed to send the test report email.');
     }
     res.json({ success: true, message: `Test report sent to ${er.adminEmail}` });
