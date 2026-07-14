@@ -36,6 +36,26 @@ const resolveLogoFile = () => {
 };
 const LOGO_FILE = resolveLogoFile();
 
+// Fetch a per-company receipt logo (a hosted URL, e.g. Cloudinary) into a
+// Buffer, because pdfkit's doc.image() needs bytes/a path, not a URL. Returns
+// null on any problem (bad URL, network error, timeout) so the caller falls
+// back to the bundled file and then the text wordmark — PDF generation never
+// fails just because the logo could not be loaded.
+async function fetchLogoBuffer(url) {
+  if (!url || typeof url !== 'string' || !/^https?:\/\//i.test(url)) return null;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 6000);
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const arrayBuf = await res.arrayBuffer();
+    return Buffer.from(arrayBuf);
+  } catch (e) {
+    return null;
+  }
+}
+
 // -- helpers --------------------------------------------------------------------
 const ONES = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine',
   'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen',
@@ -75,6 +95,7 @@ const resolveBrand = (company) => {
   return {
     receiptHeading: b.receiptHeading || 'Tax Invoice',
     legalName:      b.legalName || (company && company.name) || 'Company Name',
+    receiptLogoUrl: b.receiptLogoUrl || '',
     addressLine1:   b.addressLine1 || '',
     addressLine2:   b.addressLine2 || '',
     city:           b.city || '',
@@ -100,7 +121,7 @@ const resolveBrand = (company) => {
  * @param {Object} invoice  - Mongoose Invoice document (plain object is fine too)
  * @param {Object} [company] - Company doc/lean object with branding + currency
  */
-export function generateInvoicePdf(invoice, company = null) {
+export async function generateInvoicePdf(invoice, company = null) {
   const B = resolveBrand(company);
 
   // Prefer the rate captured on the invoice at creation time over the company's
@@ -109,6 +130,11 @@ export function generateInvoicePdf(invoice, company = null) {
   // its default taxPercent. Legacy invoices with no stored rate fall back to
   // the company branding value resolved above.
   if (invoice && Number.isFinite(invoice.taxPercent)) B.taxPercent = invoice.taxPercent;
+
+  // Per-company receipt logo (separate from the sidebar logo). Fetched to a
+  // Buffer here so it can be embedded below; null falls back to the bundled
+  // file / wordmark.
+  const logoBuffer = await fetchLogoBuffer(B.receiptLogoUrl);
 
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -153,7 +179,10 @@ export function generateInvoicePdf(invoice, company = null) {
     const bandH = 44;
     let logoDrawn = false;
     try {
-      if (LOGO_FILE) {
+      if (logoBuffer) {
+        doc.image(logoBuffer, M, y, { fit: [170, bandH - 4] });
+        logoDrawn = true;
+      } else if (LOGO_FILE) {
         doc.image(LOGO_FILE, M, y, { fit: [170, bandH - 4] });
         logoDrawn = true;
       }

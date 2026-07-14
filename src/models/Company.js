@@ -39,6 +39,7 @@ const companySchema = new mongoose.Schema(
       headerTagline:  { type: String, default: '', trim: true, maxlength: 120 },
       // Logo image URL (hosted anywhere — e.g. Cloudinary). Shown fixed in sidebar.
       logoUrl:        { type: String, default: '', trim: true },
+      receiptLogoUrl: { type: String, default: '', trim: true },   // separate logo printed on the invoice/receipt PDF
 
       // ── Receipt / Tax-Invoice document fields ──────────────────────────────
       receiptHeading: { type: String, default: 'Tax Invoice', trim: true, maxlength: 80 }, // title at top of invoice PDF
@@ -121,6 +122,7 @@ companySchema.methods.toSafeJSON = function () {
       headerName:     b.headerName     || '',
       headerTagline:  b.headerTagline  || '',
       logoUrl:        b.logoUrl        || '',
+      receiptLogoUrl: b.receiptLogoUrl || '',
       receiptHeading: b.receiptHeading || 'Tax Invoice',
       cardsHeading:   b.cardsHeading   || '',
       legalName:      b.legalName      || '',

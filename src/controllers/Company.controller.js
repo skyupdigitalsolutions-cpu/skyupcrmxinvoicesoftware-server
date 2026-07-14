@@ -8,6 +8,7 @@ import { uploadImageToCloudinary } from '../utils/cloudinary.js';
 // Whitelist + coerce branding fields so callers can't inject arbitrary keys.
 const BRANDING_STR_FIELDS = [
     'headerName', 'headerTagline', 'logoUrl', 'receiptHeading', 'cardsHeading',
+    'receiptLogoUrl',
     'legalName', 'legalNameAr', 'addressLine1', 'addressLine2', 'addressAr',
     'city', 'phone', 'email', 'website', 'trn', 'taxLabel', 'footerNote', 'declaration',
 ];
@@ -230,10 +231,21 @@ export const uploadCompanyLogo = asyncHandler(async(req, res) => {
     }
 
     if (!company.branding) company.branding = {};
-    company.branding.logoUrl = result.url;
+    // `target: 'receipt'` stores a separate logo for the invoice/receipt PDF;
+    // anything else updates the sidebar/app logo (default, backward-compatible).
+    const target = req.body && req.body.target === 'receipt' ? 'receipt' : 'sidebar';
+    if (target === 'receipt') company.branding.receiptLogoUrl = result.url;
+    else company.branding.logoUrl = result.url;
     await company.save();
 
-    res.json({ success: true, logoUrl: result.url, branding: company.toSafeJSON().branding });
+    res.json({
+        success: true,
+        url: result.url,
+        target,
+        logoUrl: company.branding.logoUrl || '',
+        receiptLogoUrl: company.branding.receiptLogoUrl || '',
+        branding: company.toSafeJSON().branding,
+    });
 });
 export const setEmailReport = asyncHandler(async(req, res) => {
     const company = await Company.findById(req.params.id);
