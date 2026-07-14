@@ -60,11 +60,12 @@ export const updateUserSchema = {
 
 // ── Orders ────────────────────────────────────────────────────────────────────
 const itemSchema = yup.object({
-    modelCode: yup.string().min(1, 'Model code required').required('Model code required'),
+    modelCode: yup.string().min(1, 'Article number required').required('Article number required'),
     description: yup.string().default(''),
+    size: yup.string().default(''),
     unit: yup.string().default('PAIR'),
-    brand: yup.string().default(''),
     qty: yup.number().typeError('qty must be a number').min(0).required(),
+    pieces: yup.number().typeError('pieces must be a number').min(0).default(0),
     price: yup.number().typeError('price must be a number').min(0).required(),
 });
 

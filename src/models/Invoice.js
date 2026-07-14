@@ -10,9 +10,10 @@ const invoiceItemSchema = new mongoose.Schema(
   {
     modelCode: { type: String, required: true, trim: true },
     description: { type: String, default: '' },
+    size: { type: String, default: '' },
     unit: { type: String, default: 'PAIR' },
-    brand: { type: String, default: '' },
     qty: { type: Number, required: true, min: 0, default: 1 },
+    pieces: { type: Number, min: 0, default: 0 },
     price: { type: Number, required: true, min: 0, default: 0 },
   },
   { _id: false }
@@ -77,4 +78,3 @@ export { VAT_RATE };
 invoiceSchema.index({ company: 1, invoiceNo: 1 }, { unique: true });
 
 export const Invoice = mongoose.model('Invoice', invoiceSchema);
-

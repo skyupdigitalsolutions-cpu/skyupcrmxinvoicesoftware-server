@@ -3,9 +3,10 @@ import mongoose from 'mongoose';
 const orderItemSchema = new mongoose.Schema({
     modelCode: { type: String, required: true, trim: true },
     description: { type: String, trim: true, default: '' },
+    size: { type: String, trim: true, default: '' },
     unit: { type: String, default: 'PAIR' },
-    brand: { type: String, trim: true, default: '' },
     qty: { type: Number, required: true, min: 0, default: 1 },
+    pieces: { type: Number, min: 0, default: 0 },
     price: { type: Number, required: true, min: 0, default: 0 },
 }, { _id: false });
 
