@@ -13,6 +13,38 @@ import chatRoutes from './chat.routes.js';
 
 const router = Router();
 router.get('/health', (_req, res) => res.json({ success: true, status: 'ok', time: new Date().toISOString() }));
+
+// ── TEMPORARY DIAGNOSTIC — remove after confirming whether Render is
+// blocking outbound SMTP ports. Does a raw TCP connect only (no SMTP
+// protocol, no credentials involved) so a failure here can only mean the
+// network path itself is blocked — never a Gmail/app-password/config issue.
+// Usage: GET /api/_diag/port-check?host=smtp.gmail.com&port=587
+router.get('/_diag/port-check', async (req, res) => {
+    const net = await import('net');
+    const host = String(req.query.host || 'smtp.gmail.com');
+    const port = Number(req.query.port) || 587;
+    const timeoutMs = 8000;
+
+    const result = await new Promise((resolve) => {
+        const start = Date.now();
+        const socket = new net.Socket();
+        let done = false;
+        const finish = (ok, reason) => {
+            if (done) return;
+            done = true;
+            socket.destroy();
+            resolve({ ok, reason, ms: Date.now() - start });
+        };
+        socket.setTimeout(timeoutMs);
+        socket.once('connect', () => finish(true, 'connected'));
+        socket.once('timeout', () => finish(false, `timed out after ${timeoutMs}ms — port is very likely blocked/dropped by the network`));
+        socket.once('error', (err) => finish(false, `connection error: ${err.message}`));
+        socket.connect(port, host);
+    });
+
+    res.json({ success: true, host, port, ...result });
+});
+
 router.use('/auth', authRoutes);
 router.use('/users', userRoutes);
 router.use('/orders', orderRoutes);
