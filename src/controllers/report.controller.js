@@ -471,6 +471,46 @@ export const dailyReport = asyncHandler(async(req, res) => {
     });
     deliveries.sort((a, b) => new Date(b.at) - new Date(a.at));
 
+    // ── Delivery pending: orders still awaiting delivery (current state, not
+    // limited to the selected day). Excludes Delivered and Cancelled orders;
+    // Invoiced orders are included until their delivery stage reaches
+    // 'Delivered'. Stage is read from the status log (invoiced ⇒ at least
+    // 'Confirmed', matching the Delivery Tracker).
+    const STAGE_ORDER = ['Pending', 'Confirmed', 'Market Delay', 'Packed', 'Out for Delivery', 'Delivered'];
+    const openOrders = await Order.find({
+            ...deliveryScope,
+            status: { $nin: ['Delivered', 'Cancelled'] },
+        })
+        .select('orderNo customer city country mobile salespersonName status delivery deliveryStatus invoiceId statusHistory createdAt date')
+        .sort({ createdAt: -1 })
+        .lean();
+    const stageOfOrder = (o) => {
+        const hits = (o.statusHistory || [])
+            .filter((h) => STAGE_ORDER.includes(h.status))
+            .sort((a, b) => new Date(b.at) - new Date(a.at));
+        let stage = hits[0] ? hits[0].status :
+            (STAGE_ORDER.includes(o.status) ? o.status : 'Pending');
+        const invoiced = o.status === 'Invoiced' || o.invoiceId;
+        if (invoiced && STAGE_ORDER.indexOf(stage) < STAGE_ORDER.indexOf('Confirmed')) stage = 'Confirmed';
+        return stage;
+    };
+    const pendingDeliveries = openOrders
+        .map((o) => ({ o, stage: stageOfOrder(o) }))
+        .filter(({ stage }) => stage !== 'Delivered')
+        .map(({ o, stage }) => ({
+            _id: o._id,
+            orderNo: o.orderNo,
+            customer: o.customer,
+            city: o.city,
+            country: o.country,
+            mobile: o.mobile,
+            salespersonName: o.salespersonName,
+            stage,
+            invoiced: o.status === 'Invoiced' || Boolean(o.invoiceId),
+            deliveryDetails: o.delivery,
+            orderedAt: o.date || o.createdAt,
+        }));
+
     // Follow-ups with urgency relative to the selected day.
     const DOT = { overdue: '#DC2626', today: '#D97706', upcoming: '#2563EB' };
     const followUps = allOpen.map((l) => {
@@ -483,6 +523,7 @@ export const dailyReport = asyncHandler(async(req, res) => {
             _id: l._id,
             name: l.name,
             mobile: l.mobile,
+            country: l.country,
             note: l.remark,
             assignedUser: l.ownerName,
             urgency,
@@ -513,11 +554,13 @@ export const dailyReport = asyncHandler(async(req, res) => {
             invoicedRevenue: Number(invoicedRevenue.toFixed(2)),
             vatCollected: Number(vatCollected.toFixed(2)),
             totalDeliveries: deliveries.length,
+            pendingDeliveries: pendingDeliveries.length,
         },
         leads: dayLeads.map((l) => ({
             _id: l._id,
             name: l.name,
             mobile: l.mobile,
+            country: l.country,
             source: l.source,
             campaign: l.campaign,
             assignedUserName: l.ownerName,
@@ -530,6 +573,7 @@ export const dailyReport = asyncHandler(async(req, res) => {
         orders,
         invoices,
         deliveries,
+        pendingDeliveries,
         followUps,
         conversions: dayLeads
             .filter((l) => isBuyer(l))

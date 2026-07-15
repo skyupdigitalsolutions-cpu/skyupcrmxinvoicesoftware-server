@@ -12,7 +12,7 @@
  */
 import { sendMailViaSmtp } from './sendEmail.js';
 import PDFDocument from 'pdfkit';
-import { Lead } from '../models/Lead.js';
+import { Lead, displayPhone } from '../models/Lead.js';
 import { Order } from '../models/Order.js';
 
 // ── helpers ────────────────────────────────────────────────────────────────────
@@ -131,7 +131,7 @@ async function buildReportPdf(company, date, data) {
             tableRow(['Name', 'Mobile', 'Source', 'Assigned To', 'Status'], lw, doc.y, true);
             doc.moveDown(0.7);
             data.leads.slice(0, 40).forEach((l) => {
-                tableRow([l.name, l.mobile || '—', l.source, l.assignedUserName || '—', l.status], lw, doc.y);
+                tableRow([l.name, displayPhone(l.mobile, l.country) || '—', l.source, l.assignedUserName || '—', l.status], lw, doc.y);
                 doc.moveDown(0.55);
                 if (doc.y > doc.page.height - 60) {
                     doc.addPage();
@@ -209,6 +209,7 @@ async function fetchReportData(companyId, date) {
         leads: dayLeads.map((l) => ({
             name: l.name,
             mobile: l.mobile,
+            country: l.country,
             source: l.source,
             assignedUserName: l.ownerName || '—',
             status: l.status,

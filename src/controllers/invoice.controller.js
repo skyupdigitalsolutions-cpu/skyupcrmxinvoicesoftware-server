@@ -130,10 +130,12 @@ export const convertOrder = asyncHandler(async(req, res) => {
     if (req.user.role === 'sales' && String(order.salesperson) !== String(req.user._id)) {
         throw new ApiError(403, 'Not your order');
     }
-    // An order may have more than one invoice (e.g. a re-issue with a different
-    // payment status). We no longer block when order.invoiceId is already set;
-    // each conversion mints a fresh invoice number linked to the same order.
-    const isReInvoice = Boolean(order.invoiceId);
+    // One invoice per order: block conversion when an invoice already exists.
+    // (Deleting the invoice reverts the order, after which it can be invoiced
+    // again — so there is only ever one active invoice for an order.)
+    if (order.invoiceId || order.status === 'Invoiced') {
+        throw new ApiError(409, `Order #${order.orderNo} is already invoiced — only one invoice can be created per order.`);
+    }
 
     const companyId = tenantCompanyId(req);
     // Load the tenant company once — used for the tax rate (so stored totals
@@ -169,12 +171,30 @@ export const convertOrder = asyncHandler(async(req, res) => {
         if (!order.deliveryStatus && DELIVERY_STATUSES.includes(order.status)) {
             order.deliveryStatus = order.status;
         }
+        // Once an invoice is generated, the delivery tracker should show at
+        // least 'Confirmed'. Bump the stage (and log it) only when the order
+        // hasn't already progressed past Confirmed, so later stages like
+        // Packed / Out for Delivery are never regressed.
+        const rank = (s) => DELIVERY_STATUSES.indexOf(s);
+        const stageHits = (order.statusHistory || [])
+            .filter((h) => DELIVERY_STATUSES.includes(h.status))
+            .sort((a, b) => new Date(b.at) - new Date(a.at));
+        const curStage = stageHits[0] ? stageHits[0].status :
+            (DELIVERY_STATUSES.includes(order.status) ? order.status : 'Pending');
+        if (rank(curStage) < rank('Confirmed')) {
+            order.deliveryStatus = 'Confirmed';
+            order.statusHistory.push({
+                status: 'Confirmed',
+                note: `Auto-confirmed — invoice #${invoiceNo} generated`,
+                by: req.user._id,
+                byName: req.user.name,
+            });
+        }
         order.status = 'Invoiced';
         order.invoiceId = created._id; // latest invoice for quick reference
         order.statusHistory.push({
             status: 'Invoiced',
-            note: isReInvoice ?
-                `Additional invoice #${invoiceNo} generated` : `Invoice #${invoiceNo} generated`,
+            note: `Invoice #${invoiceNo} generated`,
             by: req.user._id,
             byName: req.user.name,
         });

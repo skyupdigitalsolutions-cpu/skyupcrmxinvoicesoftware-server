@@ -17,6 +17,20 @@ export function normalizePhone(raw, country = 'UAE') {
   return p;
 }
 
+// Display variant: "+<code> <local number>", e.g. "+971 506731305".
+// Used in PDFs, emails and notifications so numbers always carry their
+// country code. Falls back to the raw value when nothing can be derived.
+export function displayPhone(raw, country = 'UAE') {
+  if (!raw) return '';
+  let p = String(raw).replace(/[^\d]/g, '');
+  if (!p) return String(raw);
+  if (p.startsWith('0')) p = p.slice(1);
+  const code = DIAL[country] || '971';
+  if (!code) return String(raw);
+  if (p.startsWith(code)) return `+${code} ${p.slice(code.length)}`;
+  return `+${code} ${p}`;
+}
+
 // ── sub-schemas ─────────────────────────────────────────────────────────────
 const callLogSchema = new mongoose.Schema(
   {
@@ -85,4 +99,3 @@ leadSchema.pre('save', function (next) {
 leadSchema.index({ company: 1, mobileKey: 1 });
 
 export const Lead = mongoose.model('Lead', leadSchema);
-

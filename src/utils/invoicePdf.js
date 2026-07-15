@@ -16,6 +16,7 @@
  */
 import PDFDocument from 'pdfkit';
 import fs from 'fs';
+import { displayPhone } from '../models/Lead.js';
 import { fileURLToPath } from 'url';
 
 // Resolve an optional invoice logo. Priority:
@@ -245,7 +246,7 @@ export async function generateInvoicePdf(invoice, company = null) {
     text(`: ${[country, emirate].filter(Boolean).join(', ')}`, M + 60, ly, { size: 7 });
     ly += 14;
     text('Contact', M + 4, ly, { size: 7 });
-    text(`: ${invoice.mobile || '-'}`, M + 60, ly, { size: 7 });
+    text(`: ${displayPhone(invoice.mobile, invoice.country) || '-'}`, M + 60, ly, { size: 7 });
 
     // Right column: invoice meta grid
     const rightGutter = 4;

@@ -13,7 +13,7 @@
  *
  * Call startFollowUpReminderScheduler() once during server startup.
  */
-import { Lead } from '../models/Lead.js';
+import { Lead, displayPhone } from '../models/Lead.js';
 import { notifyUsers, ownerAndAdmins } from './notify.js';
 
 const GRACE_MIN = 60; // don't remind for follow-ups overdue by more than this
@@ -47,7 +47,7 @@ async function tick() {
         recipients,
         type: 'lead-followup-due',
         title: `Follow-up due now: ${lead.name}`,
-        body: `${lead.name}${lead.mobile ? ` (${lead.mobile})` : ''} — follow-up was scheduled for ${fmt(lead.followUpAt)}.`,
+        body: `${lead.name}${lead.mobile ? ` (${displayPhone(lead.mobile, lead.country)})` : ''} — follow-up was scheduled for ${fmt(lead.followUpAt)}.`,
         link: `/leads/${lead._id}`,
         lead: lead._id,
         dueAt: lead.followUpAt,
