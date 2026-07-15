@@ -68,19 +68,14 @@ const companySchema = new mongoose.Schema(
     },
 
     // ── Email / daily report (Brevo) ──────────────────────────────────────────
-    // brevoApiKey and senderEmail are the only fields required to send mail.
-    // brevoApiKey is select:false so it is never leaked in list responses.
+    // Sending goes through the platform's own Brevo account — configured as
+    // environment variables on the server (BREVO_API_KEY / BREVO_SENDER_EMAIL /
+    // BREVO_SENDER_NAME, see config/env.js). There is no per-company SMTP or
+    // Brevo credential of any kind here; only who gets the report and when.
     emailReport: {
       enabled:      { type: Boolean, default: false },
       adminEmail:   { type: String, default: '', trim: true, lowercase: true }, // recipient
-      senderEmail:  { type: String, default: '', trim: true, lowercase: true }, // From address
-      senderName:   { type: String, default: '', trim: true },                  // From display name
-      // SMTP (Nodemailer) credentials — works with Gmail, Zoho, Outlook, etc.
-      smtpHost:     { type: String, default: '', trim: true },                  // e.g. smtp.gmail.com
-      smtpPort:     { type: Number, default: 587 },                             // 587 (STARTTLS) or 465 (SSL)
-      smtpSecure:   { type: Boolean, default: false },                          // true for port 465
-      smtpUser:     { type: String, default: '', trim: true },                  // SMTP login (e.g. the Gmail address)
-      smtpPass:     { type: String, default: '', trim: true, select: false },   // SMTP / app password (never exposed)
+      senderName:   { type: String, default: '', trim: true },                  // From display name (falls back to platform's / company's name)
       sendAt:       { type: String, default: '08:00', trim: true },             // HH:MM (server local)
     },
 
@@ -148,14 +143,7 @@ companySchema.methods.toSafeJSON = function () {
     emailReport: {
       enabled:     er.enabled === true,
       adminEmail:  er.adminEmail  || '',
-      senderEmail: er.senderEmail || '',
       senderName:  er.senderName  || '',
-      smtpHost:    er.smtpHost     || '',
-      smtpPort:    Number.isFinite(er.smtpPort) ? er.smtpPort : 587,
-      smtpSecure:  er.smtpSecure === true,
-      smtpUser:    er.smtpUser     || '',
-      // smtpPass is select:false and never returned; expose only whether it's set.
-      hasSmtpPass: !!er.smtpPass,
       sendAt:      er.sendAt      || '08:00',
     },
     subscription: this.subscription,

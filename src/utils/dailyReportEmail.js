@@ -1,16 +1,23 @@
 /**
  * dailyReportEmail.js
- * Builds and sends the daily lead/sales report PDF to a company's admin email
- * using the company's own SMTP account (Nodemailer).
+ * Builds and sends the daily lead/sales report PDF to a company's admin
+ * email using the platform's own Brevo account — configured via environment
+ * variables on the server (BREVO_API_KEY / BREVO_SENDER_EMAIL /
+ * BREVO_SENDER_NAME), the same connection used for password-reset emails and
+ * subscription-expiry reminders. There is no per-company or DB-stored Brevo
+ * setup anymore; every company's daily report goes out through this one
+ * platform-level connection.
  *
- * External deps: nodemailer, pdfkit  (both in package.json)
- *
- * Each company stores its own Brevo API key in:
- *   company.emailReport.smtpHost / smtpUser / smtpPass  (pass select:false)
- *   company.emailReport.senderEmail  – the From address
- *   company.emailReport.senderName   – optional display name (default: company name)
+ * Per-company config that's still relevant:
+ *   company.emailReport.enabled     – whether this company gets the report
+ *   company.emailReport.adminEmail  – recipient address
+ *   company.emailReport.senderName  – optional "From" display name override
+ *                                     (falls back to the platform's sender
+ *                                     name, then the company name)
+ *   company.emailReport.sendAt      – HH:MM schedule string (scheduler only)
  */
-import { sendMailViaSmtp } from './sendEmail.js';
+import { sendBrevoEmailRaw } from './sendEmail.js';
+import { env } from '../config/env.js';
 import PDFDocument from 'pdfkit';
 import { Lead, displayPhone } from '../models/Lead.js';
 import { Order } from '../models/Order.js';
@@ -220,28 +227,31 @@ async function fetchReportData(companyId, date) {
 
 // ── Main export ───────────────────────────────────────────────────────────────
 /**
- * Sends the daily report PDF to the company's configured admin email via SMTP.
+ * Sends the daily report PDF to the company's configured admin email, via
+ * the platform's own Brevo account (env vars, shared across all companies).
  *
- * Required company.emailReport fields:
- *   brevoApiKey   – Brevo transactional API key (xkeysib-…)
- *   senderEmail   – the From address
- *   adminEmail    – recipient address
+ * Required:
+ *   company.emailReport.adminEmail   – recipient address
+ *   env.brevo.apiKey / senderEmail   – the platform's Brevo connection (set
+ *     as environment variables on the server — see config/env.js)
  *
  * Optional:
- *   senderName    – display name for the From field (defaults to company name)
- *   sendAt        – HH:MM schedule string (used by the scheduler, not here)
- *   enabled       – boolean flag (checked by the scheduler, not here)
+ *   company.emailReport.senderName  – "From" display name for this company's
+ *                                     report (defaults to the platform's
+ *                                     sender name, then the company name)
+ *   company.emailReport.sendAt      – HH:MM schedule string (scheduler only)
+ *   company.emailReport.enabled     – boolean flag (checked by the scheduler, not here)
  *
- * @param {Object} company  – Mongoose Company doc (with emailReport.smtpPass selected)
+ * @param {Object} company  – Mongoose Company doc
  * @param {Date}   date     – the report date (defaults to today)
  */
 export async function sendDailyReport(company, date = new Date()) {
-    const cfg = company.emailReport;
+    const cfg = company.emailReport || {};
+    if (!cfg.adminEmail) throw new Error('Admin recipient email is not configured.');
 
-    if (!cfg || !cfg.smtpHost) throw new Error('SMTP host is not configured.');
-    if (!cfg || !cfg.smtpUser || !cfg.smtpPass) throw new Error('SMTP username / password is not configured.');
-    if (!cfg || !cfg.adminEmail) throw new Error('Admin recipient email is not configured.');
-    if (!cfg || !cfg.senderEmail) throw new Error('Sender email is not configured.');
+    const { apiKey, senderEmail, senderName: platformSenderName } = env.brevo;
+    if (!apiKey) throw new Error('BREVO_API_KEY is not set on the server.');
+    if (!senderEmail) throw new Error('BREVO_SENDER_EMAIL is not set on the server.');
 
     const data = await fetchReportData(company._id, date);
     const pdfBuffer = await buildReportPdf(company, date, data);
@@ -282,26 +292,21 @@ export async function sendDailyReport(company, date = new Date()) {
     </div>
   `;
 
-    const from = `"${cfg.senderName || company.name}" <${cfg.senderEmail}>`;
+    const senderName = cfg.senderName || platformSenderName || company.name;
 
-    try {
-        await sendMailViaSmtp({
-            smtp: {
-                host: cfg.smtpHost,
-                port: cfg.smtpPort,
-                secure: cfg.smtpSecure,
-                user: cfg.smtpUser,
-                pass: cfg.smtpPass,
-            },
-            from,
-            to: cfg.adminEmail,
-            subject: `Daily Report — ${company.name} — ${dateStr}`,
-            html,
-            attachments: [{ filename: `daily-report-${dateStr}.pdf`, content: pdfBuffer }],
-        });
-    } catch (err) {
-        // Surface the real SMTP failure (bad password, blocked login, wrong
-        // host/port, unverified sender) instead of an opaque 500.
-        throw new Error(`Email send failed: ${(err && err.message) || 'SMTP rejected the request.'}`);
+    const ok = await sendBrevoEmailRaw({
+        apiKey,
+        senderEmail,
+        senderName,
+        to: cfg.adminEmail,
+        subject: `Daily Report — ${company.name} — ${dateStr}`,
+        html,
+        attachments: [{ name: `daily-report-${dateStr}.pdf`, content: pdfBuffer }],
+    });
+
+    if (!ok) {
+        // sendBrevoEmailRaw swallows the real error into a console.error and
+        // returns false — surface a clear message instead of an opaque 500.
+        throw new Error('Email send failed: Brevo rejected the request. Check BREVO_API_KEY / BREVO_SENDER_EMAIL on the server.');
     }
 }

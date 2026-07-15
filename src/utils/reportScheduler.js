@@ -22,16 +22,15 @@ async function tick() {
   const hhmm = nowHHMM();
   const today = todayKey();
 
-  // Load only enabled companies that have a Brevo key, sender, and recipient configured.
-  // smtpPass is select:false — must be explicitly included with the '+' prefix.
+  // Load only enabled companies that have a recipient configured. Sending
+  // itself goes through the developer's own Brevo account (checked inside
+  // sendDailyReport), so there's nothing per-company to require here beyond
+  // "enabled" + "adminEmail".
   const companies = await Company.find({
     active: true,
     'emailReport.enabled': true,
-    'emailReport.smtpHost':   { $nin: [null, ''] },
-    'emailReport.smtpUser':   { $nin: [null, ''] },
-    'emailReport.senderEmail': { $nin: [null, ''] },
-    'emailReport.adminEmail':  { $nin: [null, ''] },
-  }).select('+emailReport.smtpPass').lean({ virtuals: false });
+    'emailReport.adminEmail': { $nin: [null, ''] },
+  }).lean({ virtuals: false });
 
   for (const company of companies) {
     const sendAt = company.emailReport?.sendAt || '08:00';

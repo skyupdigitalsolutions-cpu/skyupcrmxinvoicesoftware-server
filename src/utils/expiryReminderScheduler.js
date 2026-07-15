@@ -4,9 +4,11 @@
  * within the configured number of days of its renewal/expiry date — so they
  * can renew before the account is paused.
  *
- * In-app notifications always fire. Email is sent via the PLATFORM-wide Brevo
- * connection (PlatformSettings.expiryEmail), not each company's own Brevo —
- * one platform key, addressed to each company's admin email.
+ * In-app notifications always fire. Email is sent via the platform's own
+ * Brevo account (env vars — BREVO_API_KEY / BREVO_SENDER_EMAIL /
+ * BREVO_SENDER_NAME, see config/env.js), the same connection used for
+ * password resets and every company's daily report. Behavior settings
+ * (enabled / remindDays / ccOwnerEmail) still live in PlatformSettings.
  *
  * Sends a reminder on EACH day of the countdown window (e.g. on all 5 days
  * before expiry), once per day — tracked via subscription.expiryReminderSentFor
@@ -17,6 +19,7 @@
  */
 import { Company } from '../models/Company.js';
 import { PlatformSettings } from '../models/PlatformSettings.js';
+import { env } from '../config/env.js';
 import { notifyUsers, adminsOf } from './notify.js';
 import { sendBrevoEmailRaw } from './sendEmail.js';
 
@@ -53,11 +56,13 @@ const buildHtml = (brandName, daysLeft, renewal) => `
 async function tick() {
   const now = new Date();
 
-  // Load the platform-wide expiry-email config (with the secret key).
-  const platform = await PlatformSettings.getSingleton(true);
+  // Behavior settings (enabled / remindDays / ccOwnerEmail) still live in the
+  // DB — only the Brevo credentials themselves moved to env vars.
+  const platform = await PlatformSettings.getSingleton();
   const pe = platform.expiryEmail || {};
   const remindDays = Math.min(MAX_WINDOW_DAYS, Math.max(1, pe.remindDays || DEFAULT_REMIND_DAYS));
-  const emailReady = !!(pe.enabled && pe.brevoApiKey && pe.senderEmail);
+  const { apiKey: brevoApiKey, senderEmail: brevoSenderEmail, senderName: brevoSenderName } = env.brevo;
+  const emailReady = !!(pe.enabled && brevoApiKey && brevoSenderEmail);
 
   const windowEnd = new Date(now.getTime() + remindDays * DAY_MS);
 
@@ -101,9 +106,9 @@ async function tick() {
         if (to.length) {
           const brandName = company.branding?.headerName || company.name;
           await sendBrevoEmailRaw({
-            apiKey: pe.brevoApiKey,
-            senderEmail: pe.senderEmail,
-            senderName: pe.senderName || 'Subscriptions',
+            apiKey: brevoApiKey,
+            senderEmail: brevoSenderEmail,
+            senderName: brevoSenderName || 'Subscriptions',
             to,
             bcc: pe.ccOwnerEmail || undefined,
             subject: `Subscription expiring in ${daysLeft} day${daysLeft === 1 ? '' : 's'} — ${brandName}`,

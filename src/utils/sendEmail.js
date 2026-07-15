@@ -1,93 +1,24 @@
 /**
  * sendEmail.js
- * All Brevo (Sendinblue) email sending for the platform.
+ * All Brevo (Sendinblue) email sending for the platform. Every send in this
+ * app now goes through Brevo's HTTP API — there is no SMTP path anymore
+ * (SMTP sockets are blocked outbound on some hosts, e.g. Render's free tier,
+ * so an HTTP-based provider is used everywhere instead).
  *
- * Three exported senders:
- *  1. sendBrevoEmail      – per-company daily report (uses company's own key)
- *  2. sendBrevoEmailRaw   – arbitrary HTML with explicit credentials (expiry reminders)
- *  3. sendPasswordResetEmail – platform system email using BREVO_* env vars
+ * Two exported senders:
+ *  1. sendBrevoEmailRaw      – arbitrary HTML with explicit credentials
+ *                              (used for expiry reminders AND the per-company
+ *                              daily report, both via the developer's own
+ *                              Brevo account — see PlatformSettings)
+ *  2. sendPasswordResetEmail – platform system email using BREVO_* env vars
  */
 import * as brevo from '@getbrevo/brevo';
-import nodemailer from 'nodemailer';
 import { env } from '../config/env.js';
 
-// ── SMTP (Nodemailer) helpers — per-company daily report ─────────────────────
-// Provider-agnostic: works with Gmail, Zoho, Outlook, or any SMTP server. Each
-// company stores its own SMTP credentials in company.emailReport.
-//
-// cfg shape: { host, port, secure, user, pass }
-
-export function createSmtpTransport(cfg) {
-    const port = Number(cfg && cfg.port) || 587;
-    return nodemailer.createTransport({
-        host: cfg && cfg.host,
-        port,
-        // secure=true for port 465 (implicit TLS); false uses STARTTLS (587).
-        secure: cfg && cfg.secure !== undefined ? !!cfg.secure : port === 465,
-        auth: { user: cfg && cfg.user, pass: cfg && cfg.pass },
-    });
-}
-
-// Verify SMTP credentials/connection without sending an email.
-export async function verifySmtpConfig(cfg) {
-    if (!cfg || !cfg.host) return { valid: false, error: 'SMTP host is required (e.g. smtp.gmail.com).' };
-    if (!cfg.user || !cfg.pass) return { valid: false, error: 'SMTP username and password are required.' };
-    try {
-        const transport = createSmtpTransport(cfg);
-        await transport.verify();
-        return { valid: true };
-    } catch (err) {
-        return { valid: false, error: (err && err.message) || 'Could not connect to the SMTP server.' };
-    }
-}
-
-// Send an email through a given SMTP config. Attachments use nodemailer's
-// { filename, content: <Buffer> } shape.
-export async function sendMailViaSmtp({ smtp, from, to, bcc, subject, html, attachments }) {
-    const transport = createSmtpTransport(smtp);
-    const recipients = (Array.isArray(to) ? to : [to]).filter(Boolean);
-    return transport.sendMail({
-        from,
-        to: recipients,
-        bcc: bcc || undefined,
-        subject,
-        html,
-        attachments: attachments || undefined,
-    });
-}
-
-// ── 1. Per-company sender (daily report) ──────────────────────────────────────
-export async function sendBrevoEmail({ company, to, subject, html }) {
-    try {
-        const cfg = (company && company.emailReport) || {};
-        const companyName = company && company.name;
-        if (!cfg.brevoApiKey) { console.warn(`[email] No Brevo key for ${companyName}; skipping.`); return false; }
-        if (!cfg.senderEmail) { console.warn(`[email] No sender email for ${companyName}; skipping.`); return false; }
-
-        const recipients = (Array.isArray(to) ? to : [to]).filter(Boolean);
-        const finalTo = recipients.length ? recipients : (cfg.adminEmail ? [cfg.adminEmail] : []);
-        if (!finalTo.length) { console.warn(`[email] No recipient for ${companyName}; skipping.`); return false; }
-
-        const apiInstance = new brevo.TransactionalEmailsApi();
-        apiInstance.authentications['apiKey'].apiKey = cfg.brevoApiKey;
-
-        const msg = new brevo.SendSmtpEmail();
-        msg.sender = { name: cfg.senderName || company.name, email: cfg.senderEmail };
-        msg.to = finalTo.map((email) => ({ email }));
-        msg.subject = subject;
-        msg.htmlContent = html;
-
-        await apiInstance.sendTransacEmail(msg);
-        return true;
-    } catch (err) {
-        const companyName = company && company.name;
-        console.error(`[email] send failed for ${companyName}:`, err.message);
-        return false;
-    }
-}
-
-// ── 2. Raw sender (platform expiry reminders) ──────────────────────────────────
-export async function sendBrevoEmailRaw({ apiKey, senderEmail, senderName, to, bcc, subject, html }) {
+// ── 1. Raw sender (platform expiry reminders + per-company daily report,
+//        both now go through the developer's own Brevo account) ─────────────
+// `attachments` (optional): [{ name: 'file.pdf', content: <Buffer|base64 string> }]
+export async function sendBrevoEmailRaw({ apiKey, senderEmail, senderName, to, bcc, subject, html, attachments }) {
     try {
         if (!apiKey || !senderEmail) { console.warn('[email] raw send missing apiKey/sender; skipping.'); return false; }
         const recipients = (Array.isArray(to) ? to : [to]).filter(Boolean);
@@ -103,6 +34,12 @@ export async function sendBrevoEmailRaw({ apiKey, senderEmail, senderName, to, b
         if (bccList.length) msg.bcc = bccList.map((email) => ({ email }));
         msg.subject = subject;
         msg.htmlContent = html;
+        if (Array.isArray(attachments) && attachments.length) {
+            msg.attachment = attachments.map((a) => ({
+                name: a.name,
+                content: Buffer.isBuffer(a.content) ? a.content.toString('base64') : a.content,
+            }));
+        }
 
         await apiInstance.sendTransacEmail(msg);
         return true;
@@ -112,7 +49,7 @@ export async function sendBrevoEmailRaw({ apiKey, senderEmail, senderName, to, b
     }
 }
 
-// ── 3. Verify a Brevo API key (no email sent) ─────────────────────────────────
+// ── 2. Verify a Brevo API key (no email sent) ─────────────────────────────────
 export async function verifyBrevoApiKey(apiKey) {
     if (!apiKey || !apiKey.trim()) return { valid: false, error: 'No API key provided.' };
     try {
@@ -131,7 +68,7 @@ export async function verifyBrevoApiKey(apiKey) {
     }
 }
 
-// ── 4. Password reset email (uses platform BREVO_* env vars) ─────────────────
+// ── 3. Password reset email (uses platform BREVO_* env vars) ─────────────────
 /**
  * @param {Object} opts
  * @param {string}   opts.to        – recipient email address

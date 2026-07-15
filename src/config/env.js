@@ -21,8 +21,10 @@ export const env = {
   isProd: process.env.NODE_ENV === 'production',
 
   // ── Brevo (platform-level) ────────────────────────────────────────────────
-  // Used for system emails: password reset, etc.
-  // Set these in your .env file:
+  // The ONE Brevo account for every platform-sent email: password reset,
+  // subscription-expiry reminders, and every company's daily report. No
+  // per-company or DB-stored Brevo config anymore — set these once here,
+  // as environment variables on the server (e.g. in Render's dashboard):
   //   BREVO_API_KEY       = xkeysib-…
   //   BREVO_SENDER_EMAIL  = no-reply@yourplatform.com  (must be verified in Brevo)
   //   BREVO_SENDER_NAME   = Your Platform Name
