@@ -6,6 +6,34 @@ import { Counter } from '../models/Counter.js';
 import { Order } from '../models/Order.js';
 import { Company } from '../models/Company.js';
 import { tenantScope, tenantCompanyId } from '../middleware/auth.js';
+import { notifyUsers, adminsOf } from '../utils/notify.js';
+
+// Human-readable labels for the fields we track edits on — used both in the
+// stored history and the admin notification text.
+const FIELD_LABELS = {
+    name: 'Name', mobile: 'Mobile', country: 'Country', city: 'City', email: 'Email',
+    source: 'Source', campaign: 'Campaign', interest: 'Interest', remark: 'Remark',
+    delivery: 'Delivery', status: 'Status', followUpAt: 'Follow-up date', owner: 'Owner',
+};
+
+// Diff `fields` between the lead's current values and the incoming `body`,
+// returning only entries that actually changed (skips undefined-in-body and
+// no-op writes). Dates are compared by ISO string so re-saving the same
+// followUpAt doesn't count as a change.
+function diffFields(lead, body, fields) {
+    const changes = [];
+    fields.forEach((f) => {
+        if (body[f] === undefined) return;
+        const before = lead[f] instanceof Date ? lead[f].toISOString() : (lead[f] ?? null);
+        const afterRaw = body[f];
+        const after = afterRaw instanceof Date ? afterRaw.toISOString() : afterRaw;
+        const beforeCmp = before === '' ? null : before;
+        const afterCmp = after === '' ? null : after;
+        if (String(beforeCmp ?? '') === String(afterCmp ?? '')) return;
+        changes.push({ field: f, from: lead[f] ?? null, to: afterRaw ?? null });
+    });
+    return changes;
+}
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -72,7 +100,13 @@ export const listLeads = asyncHandler(async(req, res) => {
     }
 
     const leads = await Lead.find(q).sort({ createdAt: -1 }).limit(500);
-    res.json({ success: true, leads });
+
+    // Edit history is admin-only — strip it out for sales users' own view.
+    const out = req.user.role === 'admin' ?
+        leads :
+        leads.map((l) => { const o = l.toObject(); delete o.editHistory; return o; });
+
+    res.json({ success: true, leads: out });
 });
 
 // ── Get single lead (owner OR any authenticated user — for cross-employee view) ──
@@ -85,7 +119,12 @@ export const getLead = asyncHandler(async(req, res) => {
     const canEdit = isOwner || req.user.role === 'admin';
     const canContribute = true; // any employee can add calls/notes
 
-    res.json({ success: true, lead, isOwner, canEdit, canContribute });
+    // Edit history is admin-only.
+    const out = req.user.role === 'admin' ?
+        lead :
+        (() => { const o = lead.toObject(); delete o.editHistory; return o; })();
+
+    res.json({ success: true, lead: out, isOwner, canEdit, canContribute });
 });
 
 // ── Create lead (checks for duplicate phone) ──────────────────────────────────
@@ -173,6 +212,11 @@ export const updateLead = asyncHandler(async(req, res) => {
     }
 
     const fields = ['name', 'mobile', 'country', 'city', 'email', 'source', 'campaign', 'interest', 'remark', 'delivery', 'status', 'followUpAt'];
+
+    // Capture the diff BEFORE applying changes, so the history/notification
+    // reflect exactly what this save actually changed.
+    const changes = diffFields(lead, req.body, fields);
+
     fields.forEach((f) => { if (req.body[f] !== undefined) lead[f] = req.body[f]; });
 
     // Admin can re-assign owner
@@ -181,11 +225,40 @@ export const updateLead = asyncHandler(async(req, res) => {
         import ('../models/User.js');
         // Re-assignment is restricted to users within the same company.
         const u = await User.findOne({ _id: req.body.owner, company: lead.company });
-        if (u) { lead.owner = u._id;
-            lead.ownerName = u.name; }
+        if (u && String(u._id) !== String(lead.owner)) {
+            changes.push({ field: 'owner', from: lead.ownerName || null, to: u.name });
+            lead.owner = u._id;
+            lead.ownerName = u.name;
+        }
+    }
+
+    if (changes.length) {
+        lead.editHistory.push({ by: req.user._id, byName: req.user.name, changes });
     }
 
     await lead.save();
+
+    // Notify every admin whenever a lead is edited — the owner themselves
+    // doesn't need a notification for their own edit, so admins only.
+    if (changes.length) {
+        const admins = await adminsOf(lead.company);
+        // Don't also notify the editor if they happen to be an admin — they
+        // already know they just made the change.
+        const recipients = admins.filter((id) => String(id) !== String(req.user._id));
+        if (recipients.length) {
+            const summary = changes.map((c) => FIELD_LABELS[c.field] || c.field).join(', ');
+            notifyUsers({
+                company: lead.company,
+                recipients,
+                type: 'lead-edited',
+                title: `Lead edited: ${lead.name}`,
+                body: `${req.user.name} updated ${summary}.`,
+                link: `/leads/${lead._id}`,
+                lead: lead._id,
+            });
+        }
+    }
+
     res.json({ success: true, lead });
 });
 
@@ -199,8 +272,35 @@ export const setLeadStatus = asyncHandler(async(req, res) => {
         throw new ApiError(403, 'Only the owner or admin can change status');
     }
 
+    const prevStatus = lead.status;
     lead.status = req.body.status;
+
+    if (prevStatus !== lead.status) {
+        lead.editHistory.push({
+            by: req.user._id,
+            byName: req.user.name,
+            changes: [{ field: 'status', from: prevStatus, to: lead.status }],
+        });
+    }
+
     await lead.save();
+
+    if (prevStatus !== lead.status) {
+        const admins = await adminsOf(lead.company);
+        const recipients = admins.filter((id) => String(id) !== String(req.user._id));
+        if (recipients.length) {
+            notifyUsers({
+                company: lead.company,
+                recipients,
+                type: 'lead-edited',
+                title: `Lead edited: ${lead.name}`,
+                body: `${req.user.name} changed Status from "${prevStatus}" to "${lead.status}".`,
+                link: `/leads/${lead._id}`,
+                lead: lead._id,
+            });
+        }
+    }
+
     res.json({ success: true, lead });
 });
 

@@ -52,6 +52,26 @@ const noteSchema = new mongoose.Schema(
   { _id: true }
 );
 
+// One entry per edit action (a single save may touch several fields — all
+// changed fields from that save are grouped into one entry). Admin-only
+// visibility is enforced in the controller, not here.
+const editHistorySchema = new mongoose.Schema(
+  {
+    by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    byName: { type: String, default: '' },
+    at: { type: Date, default: Date.now },
+    changes: {
+      type: [{
+        field: { type: String, required: true },
+        from: { type: mongoose.Schema.Types.Mixed, default: null },
+        to: { type: mongoose.Schema.Types.Mixed, default: null },
+      }],
+      default: [],
+    },
+  },
+  { _id: true }
+);
+
 // ── Lead schema ──────────────────────────────────────────────────────────────
 export const LEAD_STATUSES = ['New', 'Contacted', 'Interested', 'Follow-up', 'Won', 'Lost'];
 export const LEAD_SOURCES  = ['Walk-in', 'WhatsApp', 'Instagram', 'Facebook', 'Referral', 'market-in', 'Website', 'Call', 'Other'];
@@ -83,6 +103,9 @@ const leadSchema = new mongoose.Schema(
     // discussion history — any authenticated employee can append
     callLogs: { type: [callLogSchema], default: [] },
     notes:    { type: [noteSchema],   default: [] },
+    // Field-level edit trail — one entry per save that changed core details.
+    // Admin-only visibility (enforced in the controller), used for oversight.
+    editHistory: { type: [editHistorySchema], default: [] },
   },
   { timestamps: true }
 );
