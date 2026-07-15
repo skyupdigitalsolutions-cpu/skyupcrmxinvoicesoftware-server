@@ -114,9 +114,20 @@ export const getUserDetail = asyncHandler(async(req, res) => {
 
 
 export const createUser = asyncHandler(async(req, res) => {
-    const { name, username, password } = req.body;
+    const { name, password } = req.body;
     const role = req.body.role === 'admin' ? 'admin' : 'sales'; // never create developers here
-    const exists = await User.findOne({ username: username.toLowerCase() });
+
+    // Normalise the username ONCE and use that everywhere: trimmed +
+    // lowercased. The schema also lowercases/trims on save, but checking the
+    // raw input (as before) let values like " Rahul " slip past the duplicate
+    // check and blow up on the unique index instead of returning a clean 409.
+    const username = String(req.body.username || '').trim().toLowerCase();
+    if (username.length < 3) throw new ApiError(400, 'Username must be at least 3 characters');
+
+    // Case-insensitive duplicate check. The collation also catches legacy
+    // rows saved with capital letters (from before the schema lowercased
+    // usernames), which a plain lowercase equality match would miss.
+    const exists = await User.findOne({ username }).collation({ locale: 'en', strength: 2 });
     if (exists) throw new ApiError(409, 'Username already taken');
 
     // Which company this user will belong to.
@@ -138,16 +149,23 @@ export const createUser = asyncHandler(async(req, res) => {
     }
 
     const { email } = req.body;
-    const user = await User.create({
-        name,
-        username,
-        password,
-        role,
-        company: companyId,
-        email: email ? email.toLowerCase().trim() : '',
-        clockInLocation: sanitizeClockInLocation(req.body.clockInLocation),
-        locationTracking: sanitizeTracking(req.body.locationTracking),
-    });
+    let user;
+    try {
+        user = await User.create({
+            name,
+            username,
+            password,
+            role,
+            company: companyId,
+            email: email ? email.toLowerCase().trim() : '',
+            clockInLocation: sanitizeClockInLocation(req.body.clockInLocation),
+            locationTracking: sanitizeTracking(req.body.locationTracking),
+        });
+    } catch (err) {
+        // Unique-index race: two simultaneous creations of the same username.
+        if (err?.code === 11000) throw new ApiError(409, 'Username already taken');
+        throw err;
+    }
     res.status(201).json({ success: true, user: user.toSafeJSON() });
 });
 

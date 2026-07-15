@@ -71,7 +71,7 @@ export const createCompany = asyncHandler(async(req, res) => {
         if (String(admin.password).length < 6) {
             throw new ApiError(400, 'Admin password must be at least 6 characters.');
         }
-        const uExists = await User.findOne({ username: admin.username.toLowerCase().trim() });
+        const uExists = await User.findOne({ username: admin.username.toLowerCase().trim() }).collation({ locale: 'en', strength: 2 });
         if (uExists) throw new ApiError(409, `Username "${admin.username.trim()}" is already taken.`);
     }
 

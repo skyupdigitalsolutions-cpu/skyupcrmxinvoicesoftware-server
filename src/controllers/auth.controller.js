@@ -44,8 +44,14 @@ const userPayload = async (user) => {
 };
 
 export const login = asyncHandler(async (req, res) => {
-  const { username, password } = req.body;
-  const user = await User.findOne({ username: username.toLowerCase() }).select('+password +refreshTokenHash');
+  const { password } = req.body;
+  // Trim + lowercase the input, and use a case-insensitive collation so
+  // legacy accounts whose stored username still has capital letters (saved
+  // before the schema lowercased usernames) can also log in.
+  const username = String(req.body.username || '').trim().toLowerCase();
+  const user = await User.findOne({ username })
+    .collation({ locale: 'en', strength: 2 })
+    .select('+password +refreshTokenHash');
   if (!user || !user.active) throw new ApiError(401, 'Wrong username or password');
 
   const ok = await user.comparePassword(password);
@@ -159,4 +165,3 @@ export const resetPassword = asyncHandler(async (req, res) => {
 
   res.json({ success: true, message: 'Password reset successfully. You can now log in with your new password.' });
 });
-
