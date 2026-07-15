@@ -39,17 +39,18 @@ router.get('/_diag/port-check', async (req, res) => {
         socket.once('connect', () => finish(true, 'connected'));
         socket.once('timeout', () => finish(false, `timed out after ${timeoutMs}ms — port is very likely blocked/dropped by the network`));
         socket.once('error', (err) => {
-            // Node's dual-stack (IPv6+IPv4) auto-connect throws an
-            // AggregateError with a blank top-level message when every
-            // address fails — unwrap it so the real reason (ECONNREFUSED,
-            // ETIMEDOUT, etc.) for each attempted address is visible.
             if (err && Array.isArray(err.errors) && err.errors.length) {
                 const detail = err.errors.map((e) => `${e.address || '?'}:${e.port || ''} → ${e.code || e.message || 'unknown'}`).join(' | ');
                 return finish(false, `connection error (${err.errors.length} address(es) tried): ${detail}`);
             }
             finish(false, `connection error: ${err?.code || err?.message || String(err)}`);
         });
-        socket.connect(port, host);
+        // family: 4 + autoSelectFamily: false — force a single real IPv4
+        // attempt using the FULL timeoutMs window, instead of letting Node's
+        // dual-stack "Happy Eyeballs" logic race IPv4/IPv6 with its own much
+        // shorter internal ~250ms attempt timeout (which was masking the
+        // real result in the previous version of this diagnostic).
+        socket.connect({ host, port, family: 4, autoSelectFamily: false });
     });
 
     res.json({ success: true, host, port, ...result });
