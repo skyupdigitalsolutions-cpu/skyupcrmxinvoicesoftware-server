@@ -133,7 +133,7 @@ export const updateOrder = asyncHandler(async(req, res) => {
     if (!order) throw new ApiError(404, 'Order not found');
     if (order.status === 'Invoiced') throw new ApiError(400, 'Invoiced orders cannot be edited');
 
-    const fields = ['date', 'customer', 'city', 'country', 'mobile', 'delivery', 'payTerms', 'items', 'discount', 'due', 'notes'];
+    const fields = ['date', 'customer', 'city', 'country', 'mobile', 'delivery', 'deliveryContact', 'payTerms', 'items', 'discount', 'due', 'notes'];
     fields.forEach((f) => { if (req.body[f] !== undefined) order[f] = req.body[f]; });
 
     if (req.user.role === 'admin' && req.body.salesperson) {

@@ -36,6 +36,10 @@ const orderSchema = new mongoose.Schema({
     country: { type: String, default: 'UAE', index: true },
     mobile: { type: String, default: '' },
     delivery: { type: String, default: '' },
+    // Delivery contact number — entered MANUALLY on the order form (never
+    // auto-filled from the customer's mobile). Free text so it can carry its
+    // own country code, a transporter's number, etc.
+    deliveryContact: { type: String, default: '', trim: true },
     payTerms: { type: String, default: 'Cash on Delivery' },
     salesperson: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
     salespersonName: { type: String, default: '' },
