@@ -25,7 +25,7 @@ const ORDER_STATUSES = ['Pending', 'Confirmed', 'Packed', 'Market Delay', 'Shipp
 // `deliveryStatus` so the Delivery Tracker keeps working post-invoice).
 // Excludes 'Invoiced' (that's the order's own status) and 'Cancelled' (an
 // invoiced order shouldn't be marked cancelled from the tracker).
-const DELIVERY_STATUSES = ['Pending', 'Confirmed', 'Market Delay', 'Packed', 'Shipped', 'Out for Delivery', 'Delivered'];
+const DELIVERY_STATUSES = ['Pending', 'Confirmed', 'Market Delay', 'Packed', 'Out for Delivery', 'Delivered'];
 
 const orderSchema = new mongoose.Schema({
     company: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true, index: true },
