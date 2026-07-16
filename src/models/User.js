@@ -52,6 +52,12 @@ const userSchema = new mongoose.Schema({
         label: { type: String, default: '', trim: true, maxlength: 80 },
     },
 
+    // Which Terms & Conditions version (Terms.version) this user has last
+    // accepted. TermsGate compares this to the currently-published version
+    // and blocks the app (re-)prompting for acceptance when they differ.
+    termsAcceptedVersion: { type: Number, default: 0 },
+    termsAcceptedAt: { type: Date, default: null },
+
     // Admin-set live-location tracking rule. When enabled, the employee's app
     // sends a location ping every `intervalMinutes` while clocked in (web app:
     // only while the tab is open; true background needs the native app).
@@ -92,6 +98,7 @@ userSchema.methods.toSafeJSON = function() {
             enabled: !!(this.locationTracking && this.locationTracking.enabled),
             intervalMinutes: (this.locationTracking && this.locationTracking.intervalMinutes) || 30,
         },
+        termsAcceptedVersion: this.termsAcceptedVersion || 0,
     };
 };
 
