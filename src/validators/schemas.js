@@ -76,6 +76,13 @@ const orderBodyShape = {
     country: yup.string().default('UAE'),
     mobile: yup.string().default(''),
     delivery: yup.string().default(''),
+    // Delivery contact number — entered manually on the order form. Was
+    // missing from this validation schema, which caused the strict
+    // stripUnknown validator to silently delete it from every request
+    // before it ever reached the controller (the field itself, the
+    // controller's whitelist, and the model were all correct — this schema
+    // was the one place nobody updated when the field was added).
+    deliveryContact: yup.string().default(''),
     payTerms: yup.string().default('Cash on Delivery'),
     salesperson: yup.string().matches(OBJECT_ID, 'Invalid id').nullable().notRequired(),
     items: yup.array().of(itemSchema).min(1, 'At least one item required').required(),
@@ -94,6 +101,7 @@ const orderPartialShape = {
     country: yup.string().notRequired(),
     mobile: yup.string().notRequired(),
     delivery: yup.string().notRequired(),
+    deliveryContact: yup.string().notRequired(),
     payTerms: yup.string().notRequired(),
     salesperson: yup.string().matches(OBJECT_ID, 'Invalid id').nullable().notRequired(),
     items: yup.array().of(itemSchema).min(1, 'At least one item required').notRequired(),
