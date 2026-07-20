@@ -129,7 +129,7 @@ export const getLead = asyncHandler(async(req, res) => {
 
 // ── Create lead (checks for duplicate phone) ──────────────────────────────────
 export const createLead = asyncHandler(async(req, res) => {
-    const { name, mobile, country = 'UAE', city, email, source, campaign, interest, remark, delivery, status, owner } = req.body;
+    const { name, mobile, altMobile, altCountry, country = 'UAE', city, email, source, campaign, interest, remark, delivery, status, owner } = req.body;
 
     if (!name || !name.trim()) throw new ApiError(400, 'Lead name is required');
 
@@ -185,6 +185,8 @@ export const createLead = asyncHandler(async(req, res) => {
         company: companyId,
         name,
         mobile,
+        altMobile,
+        altCountry: altCountry || country,
         country,
         city,
         email,
@@ -211,7 +213,7 @@ export const updateLead = asyncHandler(async(req, res) => {
         throw new ApiError(403, 'Only the lead owner or an admin can edit core details');
     }
 
-    const fields = ['name', 'mobile', 'country', 'city', 'email', 'source', 'campaign', 'interest', 'remark', 'delivery', 'status', 'followUpAt'];
+    const fields = ['name', 'mobile', 'altMobile', 'altCountry', 'country', 'city', 'email', 'source', 'campaign', 'interest', 'remark', 'delivery', 'status', 'followUpAt'];
 
     // Capture the diff BEFORE applying changes, so the history/notification
     // reflect exactly what this save actually changed.

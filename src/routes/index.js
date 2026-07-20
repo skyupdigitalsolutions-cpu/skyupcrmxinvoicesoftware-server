@@ -11,6 +11,7 @@ import notificationRoutes from './notification.routes.js';
 import platformRoutes from './platform.routes.js';
 import chatRoutes from './chat.routes.js';
 import termsRoutes from './terms.routes.js';
+import chequeRoutes from './cheque.routes.js';
 
 const router = Router();
 router.get('/health', (_req, res) => res.json({ success: true, status: 'ok', time: new Date().toISOString() }));
@@ -27,4 +28,5 @@ router.use('/notifications', notificationRoutes);
 router.use('/platform', platformRoutes);
 router.use('/chat', chatRoutes);
 router.use('/terms', termsRoutes);
+router.use('/cheques', chequeRoutes);
 export default router;

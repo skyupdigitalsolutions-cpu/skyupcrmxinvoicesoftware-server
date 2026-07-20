@@ -81,6 +81,8 @@ const leadSchema = new mongoose.Schema(
     company:  { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true, index: true },
     name:     { type: String, required: true, trim: true },
     mobile:   { type: String, default: '', trim: true },
+    altMobile:{ type: String, default: '', trim: true }, // secondary/alternate contact number
+    altCountry:{ type: String, default: '' },             // dial-code country for altMobile (independent of the lead's main country)
     mobileKey:{ type: String, default: '', index: true }, // normalised, used for dedup
     email:    { type: String, default: '', trim: true, lowercase: true },
     country:  { type: String, default: 'UAE' },

@@ -14,9 +14,15 @@ const scopeFor = (req) => {
     return t;
 };
 
+// Read scope: EVERY authenticated user in the tenant can view all orders and
+// update delivery progress on them — regardless of who the salesperson is.
+// Only full edits (updateOrder) and deletes stay restricted to the sales
+// user's own orders via scopeFor() above.
+const readScopeFor = (req) => tenantScope(req);
+
 export const listOrders = asyncHandler(async(req, res) => {
     const { search, status, country, salesperson, from, to } = req.query;
-    const q = {...scopeFor(req) };
+    const q = {...readScopeFor(req) };
 
     if (status) q.status = status;
     if (country) q.country = country;
@@ -41,7 +47,7 @@ export const listOrders = asyncHandler(async(req, res) => {
 });
 
 export const getOrder = asyncHandler(async(req, res) => {
-    const order = await Order.findOne({ _id: req.params.id, ...scopeFor(req) });
+    const order = await Order.findOne({ _id: req.params.id, ...readScopeFor(req) });
     if (!order) throw new ApiError(404, 'Order not found');
     res.json({ success: true, order });
 });
@@ -149,8 +155,10 @@ export const updateOrder = asyncHandler(async(req, res) => {
     res.json({ success: true, order });
 });
 
+// Tenant-wide: any authenticated user can update an order's status/delivery
+// stage (this is the Delivery Tracker action), not just the owning salesperson.
 export const updateStatus = asyncHandler(async(req, res) => {
-    const order = await Order.findOne({ _id: req.params.id, ...scopeFor(req) });
+    const order = await Order.findOne({ _id: req.params.id, ...readScopeFor(req) });
     if (!order) throw new ApiError(404, 'Order not found');
 
     if (order.status === 'Invoiced') {
