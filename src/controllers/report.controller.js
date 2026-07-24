@@ -175,14 +175,26 @@ export const dashboard = asyncHandler(async(req, res) => {
     const leadsOverTime = buckets.map((b, i) => ({ label: b.label, date: b.key, newLeads: newSeries[i], converted: convSeries[i] }));
 
     // Top employees by lead count (admin only — employees see just themselves).
+    // Group by the stable owner ID, not the per-lead ownerName snapshot —
+    // that snapshot is written once at assignment time and goes stale if the
+    // user's name/username is changed later, which used to split one person
+    // into two separate rows (old leads under the old name, new leads under
+    // the new one). Resolving the CURRENT name after grouping keeps one row
+    // per person regardless of how many times their name has changed.
     const empMap = {};
     leads.forEach((l) => {
-        const name = l.ownerName || '—';
-        empMap[name] = empMap[name] || { name, leads: 0, converted: 0 };
-        empMap[name].leads += 1;
-        if (isBuyer(l)) empMap[name].converted += 1;
+        const key = String(l.owner || 'unknown');
+        if (!empMap[key]) empMap[key] = { key, leads: 0, converted: 0 };
+        empMap[key].leads += 1;
+        if (isBuyer(l)) empMap[key].converted += 1;
     });
-    const topEmployees = Object.values(empMap).sort((a, b) => b.leads - a.leads).slice(0, 6);
+    const ownerIds = Object.keys(empMap).filter((k) => k !== 'unknown');
+    const owners = ownerIds.length ? await User.find({ _id: { $in: ownerIds } }).select('name').lean() : [];
+    const nameById = new Map(owners.map((u) => [String(u._id), u.name]));
+    const topEmployees = Object.values(empMap)
+        .map((e) => ({ name: nameById.get(e.key) || 'Unknown', leads: e.leads, converted: e.converted }))
+        .sort((a, b) => b.leads - a.leads)
+        .slice(0, 6);
 
     res.json({
         success: true,
