@@ -8,7 +8,7 @@ import { tenantScope, tenantCompanyId } from '../middleware/auth.js';
 import { sendTemplateMessage, sendSessionMessage, sendMediaMessage } from '../utils/msg91.js';
 import { uploadChatAttachment } from '../utils/cloudinary.js';
 import { toE164 } from '../utils/phone.js';
-import { notifyUsers, ownerAndAdmins } from '../utils/notify.js';
+import { notifyUsers, ownerAndAdmins, adminsOf } from '../utils/notify.js';
 
 const requireAdmin = (req) => {
     if (req.user.role !== 'admin' && req.user.role !== 'developer') {
@@ -107,10 +107,18 @@ export const deleteTemplate = asyncHandler(async (req, res) => {
     res.json({ success: true, message: 'Template deleted' });
 });
 
-// ── Sending a template to one or more leads ──────────────────────────────────
+// ── Sending a template to one or more leads AND/OR raw CSV contacts ─────────
+// `leadIds` sends to existing leads as before. `contacts` (new) sends
+// directly to numbers imported from a CSV that don't match any existing
+// lead yet — nothing requires them to be added as a lead first. Once one of
+// them replies, the Communication page prompts to add them as a lead (see
+// the webhook handler and relinkContact below); until then their messages
+// are tracked by phone number alone (lead: null).
 export const sendTemplate = asyncHandler(async (req, res) => {
-    const { leadIds, templateName, language, variables, autoFillNameVar } = req.body || {};
-    if (!Array.isArray(leadIds) || !leadIds.length) throw new ApiError(400, 'Select at least one lead.');
+    const { leadIds, contacts, templateName, language, variables, autoFillNameVar } = req.body || {};
+    const hasLeadIds = Array.isArray(leadIds) && leadIds.length > 0;
+    const hasContacts = Array.isArray(contacts) && contacts.length > 0;
+    if (!hasLeadIds && !hasContacts) throw new ApiError(400, 'Select at least one lead or contact.');
     if (!templateName) throw new ApiError(400, 'Select a template.');
 
     const companyId = tenantCompanyId(req);
@@ -119,46 +127,71 @@ export const sendTemplate = asyncHandler(async (req, res) => {
         throw new ApiError(400, 'MSG91 is not configured/enabled for this company yet.');
     }
 
-    const leads = await Lead.find({ _id: { $in: leadIds }, ...tenantScope(req) });
     const results = [];
 
+    // ── Existing leads ───────────────────────────────────────────────────────
+    const leads = hasLeadIds ? await Lead.find({ _id: { $in: leadIds }, ...tenantScope(req) }) : [];
     for (const lead of leads) {
         const to = toE164(lead.mobile, lead.country);
         let vars = Array.isArray(variables) ? [...variables] : [];
-        // Optionally substitute the first variable with each lead's own name
-        // (handy for templates that open with "Hi {{1}}, ...").
         if (autoFillNameVar && vars.length) vars[0] = lead.name || vars[0];
+
+        const base = {
+            company: companyId, lead: lead._id,
+            contactName: lead.name, contactNumber: to || (lead.mobile || ''), contactCountry: lead.country,
+            direction: 'out', kind: 'template', templateName, variables: vars, text: '', sentBy: req.user._id,
+        };
 
         if (!to) {
             results.push({ leadId: lead._id, status: 'failed', error: 'Could not resolve a valid phone number for this lead.' });
-            await WhatsAppMessage.create({
-                company: companyId, lead: lead._id, direction: 'out', kind: 'template',
-                templateName, variables: vars, text: '', status: 'failed',
-                error: 'Could not resolve phone number', sentBy: req.user._id,
-            });
+            await WhatsAppMessage.create({ ...base, status: 'failed', error: 'Could not resolve phone number' });
             continue;
         }
-
         try {
             const sendRes = await sendTemplateMessage({
-                authKey: company.msg91.authKey,
-                integratedNumber: company.msg91.integratedNumber,
+                authKey: company.msg91.authKey, integratedNumber: company.msg91.integratedNumber,
                 to, templateName, language, variables: vars,
             });
-            await WhatsAppMessage.create({
-                company: companyId, lead: lead._id, direction: 'out', kind: 'template',
-                templateName, variables: vars, text: '', status: 'sent',
-                msg91RequestId: sendRes.requestId, sentBy: req.user._id,
-            });
+            await WhatsAppMessage.create({ ...base, status: 'sent', msg91RequestId: sendRes.requestId });
             results.push({ leadId: lead._id, status: 'sent' });
         } catch (err) {
             console.error(`[whatsapp] sendTemplate FAILED for lead ${lead._id}:`, err.message, '| status:', err.msg91Status, '| raw:', err.msg91RawText || '');
-            await WhatsAppMessage.create({
-                company: companyId, lead: lead._id, direction: 'out', kind: 'template',
-                templateName, variables: vars, text: '', status: 'failed',
-                error: err.message || 'Send failed', sentBy: req.user._id,
-            });
+            await WhatsAppMessage.create({ ...base, status: 'failed', error: err.message || 'Send failed' });
             results.push({ leadId: lead._id, status: 'failed', error: err.message });
+        }
+    }
+
+    // ── Raw contacts that aren't leads yet (from CSV import) ─────────────────
+    if (hasContacts) {
+        for (const c of contacts) {
+            const country = c.country || 'UAE';
+            const to = toE164(c.mobile, country);
+            let vars = Array.isArray(variables) ? [...variables] : [];
+            if (autoFillNameVar && vars.length) vars[0] = c.name || vars[0];
+
+            const base = {
+                company: companyId, lead: null,
+                contactName: c.name || '', contactNumber: to || (c.mobile || ''), contactCountry: country,
+                direction: 'out', kind: 'template', templateName, variables: vars, text: '', sentBy: req.user._id,
+            };
+
+            if (!to) {
+                results.push({ contactNumber: c.mobile, status: 'failed', error: 'Could not resolve a valid phone number.' });
+                await WhatsAppMessage.create({ ...base, status: 'failed', error: 'Could not resolve phone number' });
+                continue;
+            }
+            try {
+                const sendRes = await sendTemplateMessage({
+                    authKey: company.msg91.authKey, integratedNumber: company.msg91.integratedNumber,
+                    to, templateName, language, variables: vars,
+                });
+                await WhatsAppMessage.create({ ...base, status: 'sent', msg91RequestId: sendRes.requestId });
+                results.push({ contactNumber: to, status: 'sent' });
+            } catch (err) {
+                console.error(`[whatsapp] sendTemplate FAILED for contact ${to}:`, err.message, '| status:', err.msg91Status, '| raw:', err.msg91RawText || '');
+                await WhatsAppMessage.create({ ...base, status: 'failed', error: err.message || 'Send failed' });
+                results.push({ contactNumber: to, status: 'failed', error: err.message });
+            }
         }
     }
 
@@ -261,53 +294,153 @@ export const sendMedia = asyncHandler(async (req, res) => {
 });
 
 // ── Conversation log for the Communication page ──────────────────────────────
-// One row per lead: last message, its status, and the lead's last reply —
-// this is the "all leads' shared template and their response" table.
+// One row per lead OR per raw contact number (for numbers sent to directly
+// from a CSV import that aren't leads yet) — this is the "all leads' shared
+// template and their response" table, extended to also surface not-yet-lead
+// contacts so a reply from one of them is never invisible.
 export const listConversations = asyncHandler(async (req, res) => {
     const q = { ...tenantScope(req) };
     const messages = await WhatsAppMessage.find(q).sort({ createdAt: -1 }).limit(2000).lean();
 
-    const byLead = new Map();
+    const byKey = new Map();
     for (const m of messages) {
-        const key = String(m.lead);
-        if (!byLead.has(key)) byLead.set(key, { lastOut: null, lastIn: null });
-        const entry = byLead.get(key);
+        const key = m.lead ? `L:${m.lead}` : `N:${m.contactNumber}`;
+        if (!byKey.has(key)) {
+            byKey.set(key, {
+                lastOut: null, lastIn: null, hasUnseen: false,
+                leadId: m.lead || null, contactNumber: m.contactNumber || '', contactName: m.contactName || '',
+            });
+        }
+        const entry = byKey.get(key);
         if (m.direction === 'out' && !entry.lastOut) entry.lastOut = m;
         if (m.direction === 'in' && !entry.lastIn) entry.lastIn = m;
+        if (m.direction === 'in' && !m.seen) entry.hasUnseen = true;
+        if (!entry.contactName && m.contactName) entry.contactName = m.contactName;
     }
 
-    const leadIds = [...byLead.keys()];
-    const leads = await Lead.find({ _id: { $in: leadIds } }).select('name mobile country stage status').lean();
+    const leadIds = [...byKey.values()].filter((v) => v.leadId).map((v) => String(v.leadId));
+    const leads = await Lead.find({ _id: { $in: leadIds } }).select('name mobile country stage status owner').lean();
     const leadById = new Map(leads.map((l) => [String(l._id), l]));
 
-    const rows = leadIds
-        .map((id) => {
-            const lead = leadById.get(id);
-            if (!lead) return null;
-            const { lastOut, lastIn } = byLead.get(id);
+    // Employees only see LEAD conversations they themselves added/own — same
+    // restriction already applied to the main Leads list for the 'sales'
+    // role. Not-yet-lead contact rows have no owner to check yet, so they
+    // stay visible to whoever sent to them until someone converts one to a
+    // lead (from that point on, normal ownership rules apply).
+    const restrictToOwner = req.user.role === 'sales';
+
+    const rows = [...byKey.entries()]
+        .map(([key, entry]) => {
+            const { lastOut, lastIn, hasUnseen, leadId, contactNumber, contactName } = entry;
+
+            if (leadId) {
+                const lead = leadById.get(String(leadId));
+                if (!lead) return null;
+                if (restrictToOwner && String(lead.owner) !== String(req.user._id)) return null;
+                return {
+                    key, leadId: String(leadId), isLead: true, contactNumber: '',
+                    leadName: lead.name, mobile: lead.mobile,
+                    lastTemplate: lastOut ? lastOut.templateName || '' : '',
+                    lastStatus: lastOut ? lastOut.status : '',
+                    lastSentAt: lastOut ? lastOut.createdAt : null,
+                    lastResponse: lastIn ? lastIn.text : '',
+                    lastResponseAt: lastIn ? lastIn.createdAt : null,
+                    unread: hasUnseen,
+                };
+            }
+
             return {
-                leadId: id,
-                leadName: lead.name,
-                mobile: lead.mobile,
+                key, leadId: null, isLead: false, contactNumber,
+                leadName: contactName || contactNumber,
+                mobile: contactNumber,
                 lastTemplate: lastOut ? lastOut.templateName || '' : '',
                 lastStatus: lastOut ? lastOut.status : '',
                 lastSentAt: lastOut ? lastOut.createdAt : null,
                 lastResponse: lastIn ? lastIn.text : '',
                 lastResponseAt: lastIn ? lastIn.createdAt : null,
+                unread: hasUnseen,
             };
         })
         .filter(Boolean)
-        .sort((a, b) => new Date(b.lastSentAt || b.lastResponseAt || 0) - new Date(a.lastSentAt || a.lastResponseAt || 0));
+        // Unread conversations always float to the top, regardless of timestamp,
+        // so a new reply is never buried under older but more recent sends.
+        .sort((a, b) => {
+            if (a.unread !== b.unread) return a.unread ? -1 : 1;
+            return new Date(b.lastSentAt || b.lastResponseAt || 0) - new Date(a.lastSentAt || a.lastResponseAt || 0);
+        });
 
     res.json({ success: true, conversations: rows });
 });
 
 // Full thread for one lead (used by the "Continue Chat" drawer).
 export const getThread = asyncHandler(async (req, res) => {
-    const lead = await Lead.findOne({ _id: req.params.leadId, ...tenantScope(req) });
+    const scope = { ...tenantScope(req) };
+    if (req.user.role === 'sales') scope.owner = req.user._id;
+    const lead = await Lead.findOne({ _id: req.params.leadId, ...scope });
     if (!lead) throw new ApiError(404, 'Lead not found');
     const messages = await WhatsAppMessage.find({ lead: lead._id, ...tenantScope(req) }).sort({ createdAt: 1 });
+
+    // Opening the thread is what counts as "seen" — clear the unread flag on
+    // every inbound message for this lead so it drops out of the "unread"
+    // sort/highlight on the conversations list.
+    await WhatsAppMessage.updateMany(
+        { lead: lead._id, direction: 'in', seen: false },
+        { $set: { seen: true } }
+    );
+    // Reflect that in the response too (messages were fetched before the
+    // update above), so the client doesn't see a stale seen:false.
+    messages.forEach((m) => { if (m.direction === 'in') m.seen = true; });
+
     res.json({ success: true, lead: { id: lead._id, name: lead.name, mobile: lead.mobile }, messages: messages.map((m) => m.toSafeJSON()) });
+});
+
+// Full thread for a raw contact number that isn't a lead yet (a number sent
+// to directly from a CSV import). Same "mark as seen on open" behavior as
+// getThread above, just keyed by phone number instead of a lead ID.
+export const getThreadByNumber = asyncHandler(async (req, res) => {
+    const contactNumber = req.params.contactNumber;
+    if (!contactNumber) throw new ApiError(400, 'contactNumber is required.');
+
+    const q = { ...tenantScope(req), contactNumber, lead: null };
+    const messages = await WhatsAppMessage.find(q).sort({ createdAt: 1 });
+    if (!messages.length) throw new ApiError(404, 'No conversation found for that number.');
+
+    await WhatsAppMessage.updateMany(
+        { ...q, direction: 'in', seen: false },
+        { $set: { seen: true } }
+    );
+    messages.forEach((m) => { if (m.direction === 'in') m.seen = true; });
+
+    const withName = messages.find((m) => m.contactName);
+    const contactName = withName ? withName.contactName : '';
+    const withCountry = messages.find((m) => m.contactCountry);
+    const contactCountry = withCountry ? withCountry.contactCountry : 'UAE';
+
+    res.json({
+        success: true,
+        lead: { id: null, name: contactName || contactNumber, mobile: contactNumber, country: contactCountry },
+        messages: messages.map((m) => m.toSafeJSON()),
+    });
+});
+
+// Once a not-yet-lead contact has been added as a proper lead (via the
+// normal leadApi.create() call, which already handles required-field
+// validation and duplicate-phone checks), this reassigns their prior message
+// history from the raw contactNumber over to the new lead — so nothing from
+// before they were "official" is lost once they are.
+export const relinkContact = asyncHandler(async (req, res) => {
+    const { contactNumber, leadId } = req.body || {};
+    if (!contactNumber || !leadId) throw new ApiError(400, 'contactNumber and leadId are required.');
+
+    const lead = await Lead.findOne({ _id: leadId, ...tenantScope(req) });
+    if (!lead) throw new ApiError(404, 'Lead not found');
+
+    const result = await WhatsAppMessage.updateMany(
+        { ...tenantScope(req), contactNumber, lead: null },
+        { $set: { lead: lead._id } }
+    );
+
+    res.json({ success: true, message: `Linked ${result.modifiedCount} message(s) to ${lead.name}.`, modifiedCount: result.modifiedCount });
 });
 
 // ── Inbound webhook (MSG91 → us) ─────────────────────────────────────────────
@@ -366,7 +499,9 @@ export const webhook = asyncHandler(async (req, res) => {
             }
             if (lead) {
                 await WhatsAppMessage.create({
-                    company: lead.company, lead: lead._id, direction: 'in', kind: 'session',
+                    company: lead.company, lead: lead._id,
+                    contactName: lead.name, contactNumber: digits, contactCountry: lead.country,
+                    direction: 'in', kind: 'session',
                     text, status: 'replied',
                 });
                 // Flip the most recent outbound message for this lead to "replied"
@@ -375,6 +510,22 @@ export const webhook = asyncHandler(async (req, res) => {
                 if (lastOut) {
                     lastOut.status = 'replied';
                     await lastOut.save();
+                }
+
+                // A reply is a genuine sign of engagement — advance the lead
+                // from "Lead" stage to "Opportunity" (status: 'Contacted').
+                // Only moves a lead OUT of the earliest stage; never touches
+                // one already further along (Follow-up/Interested) or in a
+                // terminal state (Won/Lost/converted), so a reply can't
+                // silently downgrade or override progress already made.
+                if (lead.status === 'New') {
+                    lead.status = 'Contacted';
+                    lead.editHistory.push({
+                        by: lead.owner,
+                        byName: 'WhatsApp (auto)',
+                        changes: [{ field: 'status', from: 'New', to: 'Contacted — lead replied on WhatsApp' }],
+                    });
+                    await lead.save();
                 }
 
                 // Notify the lead's owner + company admins that a reply came in,
@@ -392,6 +543,39 @@ export const webhook = asyncHandler(async (req, res) => {
                     });
                 } catch (notifyErr) {
                     console.error('[whatsapp] Reply notification FAILED:', notifyErr.message);
+                }
+            } else if (company) {
+                // No lead matches this number, but we know which company it
+                // belongs to (via the integrated number) — log the reply
+                // anyway instead of silently dropping it, so it shows up in
+                // the Communication page as "Not yet a lead" with an option
+                // to add them as one using this reply's details.
+                await WhatsAppMessage.create({
+                    company: company._id, lead: null,
+                    contactName: '', contactNumber: digits, contactCountry: '',
+                    direction: 'in', kind: 'session',
+                    text, status: 'replied',
+                });
+                const lastOut = await WhatsAppMessage.findOne({ company: company._id, contactNumber: digits, lead: null, direction: 'out' }).sort({ createdAt: -1 });
+                if (lastOut) {
+                    lastOut.status = 'replied';
+                    await lastOut.save();
+                }
+
+                // No lead owner exists yet — notify every admin instead.
+                try {
+                    const admins = await adminsOf(company._id);
+                    const preview = text.length > 80 ? `${text.slice(0, 80)}…` : text;
+                    await notifyUsers({
+                        company: company._id,
+                        recipients: admins,
+                        type: 'whatsapp-reply-unlinked',
+                        title: `${digits} replied on WhatsApp — not yet a lead`,
+                        body: preview,
+                        link: '/communication',
+                    });
+                } catch (notifyErr) {
+                    console.error('[whatsapp] Unlinked-reply notification FAILED:', notifyErr.message);
                 }
             }
         }

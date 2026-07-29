@@ -11,6 +11,8 @@ import {
     sendMedia,
     listConversations,
     getThread,
+    getThreadByNumber,
+    relinkContact,
     webhook,
 } from '../controllers/whatsapp.controller.js';
 import { protect } from '../middleware/auth.js';
@@ -38,5 +40,7 @@ router.post('/send-media', sendMedia);
 
 router.get('/conversations', listConversations);
 router.get('/thread/:leadId', getThread);
+router.get('/thread-by-number/:contactNumber', getThreadByNumber);
+router.post('/relink-contact', relinkContact);
 
 export default router;
