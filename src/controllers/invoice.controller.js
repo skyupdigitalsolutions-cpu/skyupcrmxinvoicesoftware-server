@@ -17,6 +17,11 @@ const scopeFor = (req) => {
     return req.user.role === 'sales' ? {...t, createdBy: req.user._id } : t;
 };
 
+// Read scope: EVERY authenticated user in the tenant can view (and download)
+// all invoices, regardless of who created them. Edits (items/payment status/
+// regenerate PDF) stay restricted to the creator via scopeFor() above.
+const readScopeFor = (req) => tenantScope(req);
+
 // Load the tenant company (branding + currency + Cloudinary secret) for an
 // invoice. apiSecret is select:false, so it must be requested explicitly or
 // per-company Cloudinary uploads silently fall back to the platform account.
@@ -73,7 +78,7 @@ async function attachPdf(inv, company = undefined) {
 
 export const listInvoices = asyncHandler(async(req, res) => {
     const { search, paymentStatus } = req.query;
-    const q = {...scopeFor(req) };
+    const q = {...readScopeFor(req) };
     if (paymentStatus) q.paymentStatus = paymentStatus;
     if (search) {
         const rx = new RegExp(String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
@@ -85,7 +90,7 @@ export const listInvoices = asyncHandler(async(req, res) => {
 });
 
 export const getInvoice = asyncHandler(async(req, res) => {
-    const inv = await Invoice.findOne({ _id: req.params.id, ...scopeFor(req) });
+    const inv = await Invoice.findOne({ _id: req.params.id, ...readScopeFor(req) });
     if (!inv) throw new ApiError(404, 'Invoice not found');
     res.json({ success: true, invoice: inv });
 });
@@ -96,7 +101,7 @@ export const getInvoice = asyncHandler(async(req, res) => {
 // filename — the raw Cloudinary URL was serving an extension-less file that the
 // browser saved as "INV-4" and refused to open as a PDF.
 export const getInvoicePdf = asyncHandler(async(req, res) => {
-    const inv = await Invoice.findOne({ _id: req.params.id, ...scopeFor(req) });
+    const inv = await Invoice.findOne({ _id: req.params.id, ...readScopeFor(req) });
     if (!inv) throw new ApiError(404, 'Invoice not found');
 
     const company = await companyForInvoice(inv);

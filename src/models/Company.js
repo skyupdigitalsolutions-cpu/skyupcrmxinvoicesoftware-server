@@ -79,6 +79,16 @@ const companySchema = new mongoose.Schema(
       sendAt:       { type: String, default: '08:00', trim: true },             // HH:MM (server local)
     },
 
+    // ── MSG91 WhatsApp (per-company) ──────────────────────────────────────────
+    // Used by the Communication page to send approved WhatsApp templates to
+    // leads and to receive delivery/read status + inbound replies via webhook.
+    msg91: {
+      enabled:          { type: Boolean, default: false },
+      authKey:          { type: String, default: '', trim: true, select: false }, // never exposed via API
+      integratedNumber: { type: String, default: '', trim: true }, // the WhatsApp business number registered with MSG91 (used to route inbound webhooks to this company)
+      senderName:       { type: String, default: '', trim: true },
+    },
+
     // ── Subscription / billing ────────────────────────────────────────────────
     subscription: {
       plan:              { type: String, enum: ['Free', 'Basic', 'Pro', 'Enterprise'], default: 'Free' },
@@ -145,6 +155,13 @@ companySchema.methods.toSafeJSON = function () {
       adminEmail:  er.adminEmail  || '',
       senderName:  er.senderName  || '',
       sendAt:      er.sendAt      || '08:00',
+    },
+    msg91: {
+      enabled:          !!(this.msg91 && this.msg91.enabled === true),
+      integratedNumber: (this.msg91 && this.msg91.integratedNumber) || '',
+      senderName:       (this.msg91 && this.msg91.senderName) || '',
+      hasAuthKey:       !!(this.msg91 && this.msg91.authKey),
+      // never expose authKey
     },
     subscription: this.subscription,
     contactEmail: this.contactEmail,

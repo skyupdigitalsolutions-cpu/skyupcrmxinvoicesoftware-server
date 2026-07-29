@@ -263,7 +263,7 @@ export const salesReport = asyncHandler(async(req, res) => {
     const orders = await Order.find(match);
     const invoices = await Invoice.find(invoiceMatch);
 
-    const bySalesperson = {};
+    const bySalespersonMap = {};
     const byCountry = {};
     const byStatus = {};
     let revenue = 0,
@@ -273,11 +273,30 @@ export const salesReport = asyncHandler(async(req, res) => {
         revenue += o.grandTotal;
         const u = o.items.reduce((s, it) => s + it.qty, 0);
         units += u;
-        bySalesperson[o.salespersonName || '—'] = bySalesperson[o.salespersonName || '—'] || { orders: 0, revenue: 0 };
-        bySalesperson[o.salespersonName || '—'].orders += 1;
-        bySalesperson[o.salespersonName || '—'].revenue += o.grandTotal;
+        // Group by the stable salesperson ID, not the per-order salespersonName
+        // snapshot — that snapshot is written once when the order is created
+        // and goes stale if the user's name/username is changed later, which
+        // used to split one person into two separate rows in this panel
+        // (same issue as the Top Employees widget above).
+        const key = String(o.salesperson || 'unknown');
+        if (!bySalespersonMap[key]) bySalespersonMap[key] = { orders: 0, revenue: 0 };
+        bySalespersonMap[key].orders += 1;
+        bySalespersonMap[key].revenue += o.grandTotal;
         byCountry[o.country] = (byCountry[o.country] || 0) + o.grandTotal;
         byStatus[o.status] = (byStatus[o.status] || 0) + 1;
+    });
+
+    // Resolve each salesperson's CURRENT name after grouping, so a later
+    // name/username change can't split them into two rows.
+    const spIds = Object.keys(bySalespersonMap).filter((k) => k !== 'unknown');
+    const spUsers = spIds.length ? await User.find({ _id: { $in: spIds } }).select('name').lean() : [];
+    const spNameById = new Map(spUsers.map((u) => [String(u._id), u.name]));
+    const bySalesperson = {};
+    Object.entries(bySalespersonMap).forEach(([key, val]) => {
+        const name = key === 'unknown' ? '—' : (spNameById.get(key) || '—');
+        bySalesperson[name] = bySalesperson[name] || { orders: 0, revenue: 0 };
+        bySalesperson[name].orders += val.orders;
+        bySalesperson[name].revenue += val.revenue;
     });
 
     const vatCollected = invoices.reduce((s, v) => s + v.vatAmt, 0);

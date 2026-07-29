@@ -68,6 +68,29 @@ export async function uploadImageToCloudinary(dataUri, publicId, creds = null) {
   }).then((result) => ({ url: result.secure_url, publicId: result.public_id }));
 }
 
+/**
+ * Upload a WhatsApp chat attachment (image, document, video, or audio) as a
+ * base64 data URL. Unlike uploadImageToCloudinary (used for logos), this does
+ * NOT crop/resize — chat attachments must stay at their original size/quality
+ * for WhatsApp delivery. resource_type: 'auto' lets Cloudinary detect image
+ * vs video vs raw (documents/audio) automatically.
+ * Returns { url, publicId, resourceType }.
+ * @param {string} dataUri  – "data:<mime>;base64,..."
+ * @param {string} publicId – e.g. "whatsapp/<companyId>/<timestamp>-<filename>"
+ * @param {{ cloudName, apiKey, apiSecret }|null} creds
+ */
+export async function uploadChatAttachment(dataUri, publicId, creds = null) {
+  const client = getClient(creds);
+  const result = await client.uploader.upload(dataUri, {
+    public_id: publicId,
+    resource_type: 'auto',
+    folder: 'whatsapp-attachments',
+    overwrite: false,
+    use_filename: false,
+  });
+  return { url: result.secure_url, publicId: result.public_id, resourceType: result.resource_type };
+}
+
 export async function deleteImageFromCloudinary(publicId, creds = null) {
   if (!publicId) return;
   const client = getClient(creds);

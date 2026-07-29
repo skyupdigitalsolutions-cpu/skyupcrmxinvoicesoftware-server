@@ -4,6 +4,7 @@ import app from './app.js';
 import { startReportScheduler } from './utils/reportScheduler.js';
 import { startFollowUpReminderScheduler } from './utils/followUpReminderScheduler.js';
 import { startExpiryReminderScheduler } from './utils/expiryReminderScheduler.js';
+import { startChequeReminderScheduler } from './utils/chequeReminderScheduler.js';
 
 const start = async () => {
   await connectDB();
@@ -13,6 +14,7 @@ const start = async () => {
   startReportScheduler();
   startFollowUpReminderScheduler();
   startExpiryReminderScheduler();
+  startChequeReminderScheduler();
   process.on('unhandledRejection', (err) => {
     console.error('Unhandled rejection:', err);
     server.close(() => process.exit(1));
