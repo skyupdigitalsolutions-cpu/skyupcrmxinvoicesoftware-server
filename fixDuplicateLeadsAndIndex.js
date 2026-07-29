@@ -149,7 +149,7 @@ async function main() {
     try {
       await leadsCollection.createIndex(
         { company: 1, mobileKey: 1 },
-        { unique: true, partialFilterExpression: { mobileKey: { $ne: '' } }, name: 'company_1_mobileKey_1' }
+        { unique: true, partialFilterExpression: { mobileKey: { $gt: '' } }, name: 'company_1_mobileKey_1' }
       );
       console.log('  ✓ Created the unique (company, mobileKey) index successfully.\n');
     } catch (err) {

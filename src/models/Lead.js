@@ -153,7 +153,12 @@ leadSchema.pre('save', function (next) {
 // never collide with each other.
 leadSchema.index(
   { company: 1, mobileKey: 1 },
-  { unique: true, partialFilterExpression: { mobileKey: { $ne: '' } } }
+  // NOTE: $gt '' (not $ne '') — MongoDB partial indexes explicitly disallow
+  // $not-based expressions (which is what $ne compiles to internally), so it
+  // rejects the index outright with "Expression not supported in partial
+  // index: $not". $gt achieves the identical "mobileKey is a non-empty
+  // string" effect for strings and IS an allowed partial-index operator.
+  { unique: true, partialFilterExpression: { mobileKey: { $gt: '' } } }
 );
 
 export const Lead = mongoose.model('Lead', leadSchema);
