@@ -7,6 +7,9 @@ import { Order } from '../models/Order.js';
 import { Company } from '../models/Company.js';
 import { tenantScope, tenantCompanyId } from '../middleware/auth.js';
 import { notifyUsers, adminsOf } from '../utils/notify.js';
+import { Cheque } from '../models/Cheque.js';
+import { WhatsAppMessage } from '../models/WhatsAppMessage.js';
+import { Notification } from '../models/Notification.js';
 
 // Human-readable labels for the fields we track edits on — used both in the
 // stored history and the admin notification text.
@@ -379,7 +382,145 @@ export const convertLead = asyncHandler(async(req, res) => {
     res.json({ success: true, lead, order });
 });
 
-// ── Delete lead (admin only) ──────────────────────────────────────────────────
+// ── Duplicate leads: find & merge (admin only) ───────────────────────────────
+// Groups existing leads that share the same normalised phone number
+// (mobileKey) within the company — this is for cleaning up leads that were
+// already duplicated before the create-time guard existed/applied, or from
+// any other historical gap. Empty/blank mobileKey is excluded so leads with
+// no phone number never get grouped together.
+export const listDuplicateLeads = asyncHandler(async(req, res) => {
+    const companyId = tenantCompanyId(req);
+
+    const groups = await Lead.aggregate([
+        { $match: { company: companyId, mobileKey: { $ne: '' } } },
+        { $group: { _id: '$mobileKey', ids: { $push: '$_id' }, count: { $sum: 1 } } },
+        { $match: { count: { $gt: 1 } } },
+    ]);
+
+    if (!groups.length) return res.json({ success: true, groups: [] });
+
+    const allIds = groups.flatMap((g) => g.ids);
+    const leads = await Lead.find({ _id: { $in: allIds } })
+        .select('name mobile country city status owner ownerName converted orderNo createdAt callLogs notes mobileKey')
+        .lean();
+    const byId = new Map(leads.map((l) => [String(l._id), l]));
+
+    const out = groups.map((g) => ({
+        mobileKey: g._id,
+        leads: g.ids
+            .map((id) => byId.get(String(id)))
+            .filter(Boolean)
+            .map((l) => ({
+                id: l._id,
+                name: l.name,
+                mobile: l.mobile,
+                country: l.country,
+                city: l.city,
+                status: l.status,
+                owner: l.owner,
+                ownerName: l.ownerName,
+                converted: l.converted,
+                orderNo: l.orderNo,
+                callLogCount: (l.callLogs || []).length,
+                noteCount: (l.notes || []).length,
+                createdAt: l.createdAt,
+            }))
+            .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt)),
+    }));
+
+    res.json({ success: true, groups: out });
+});
+
+// Merges one or more duplicate leads into a single "keep" lead: combines call
+// logs, notes, and edit history; reassigns any Cheque / WhatsAppMessage /
+// Notification records pointing at a merged-away lead; archives each merged
+// lead to DeletedContact (same append-only archive used for outright
+// deletion); then removes the merged-away lead documents. Never touches
+// Orders/Invoices — they store a snapshot (name/mobile), not a lead reference.
+export const mergeLeads = asyncHandler(async(req, res) => {
+    const { keepId, mergeIds } = req.body || {};
+    if (!keepId || !Array.isArray(mergeIds) || !mergeIds.length) {
+        throw new ApiError(400, 'keepId and at least one mergeIds entry are required.');
+    }
+    if (mergeIds.includes(keepId)) {
+        throw new ApiError(400, 'keepId cannot also appear in mergeIds.');
+    }
+
+    const scope = tenantScope(req);
+    const keepLead = await Lead.findOne({ _id: keepId, ...scope });
+    if (!keepLead) throw new ApiError(404, 'The lead to keep was not found.');
+
+    const duplicates = await Lead.find({ _id: { $in: mergeIds }, ...scope });
+    if (!duplicates.length) throw new ApiError(404, 'None of the selected duplicate leads were found.');
+
+    let mergedCallLogs = 0;
+    let mergedNotes = 0;
+
+    for (const dup of duplicates) {
+        // Combine discussion history into the kept lead.
+        if (dup.callLogs && dup.callLogs.length) {
+            keepLead.callLogs.push(...dup.callLogs);
+            mergedCallLogs += dup.callLogs.length;
+        }
+        if (dup.notes && dup.notes.length) {
+            keepLead.notes.push(...dup.notes);
+            mergedNotes += dup.notes.length;
+        }
+        if (dup.editHistory && dup.editHistory.length) {
+            keepLead.editHistory.push(...dup.editHistory);
+        }
+        // Record the merge itself as an edit-history entry for oversight.
+        keepLead.editHistory.push({
+            by: req.user._id,
+            byName: req.user.name,
+            changes: [{ field: 'merged', from: null, to: `Merged duplicate lead "${dup.name}" (${dup._id}) into this one` }],
+        });
+
+        // Reassign anything pointing at the duplicate lead over to the kept one.
+        await Promise.all([
+            Cheque.updateMany({ lead: dup._id }, { $set: { lead: keepLead._id } }),
+            WhatsAppMessage.updateMany({ lead: dup._id }, { $set: { lead: keepLead._id } }),
+            Notification.updateMany({ lead: dup._id }, { $set: { lead: keepLead._id } }),
+        ]);
+
+        // Archive the duplicate the same way an outright delete does, so its
+        // phone number stays visible in the Deleted Contacts report.
+        try {
+            await DeletedContact.create({
+                company: dup.company,
+                name: dup.name || '',
+                mobile: dup.mobile || '',
+                mobileKey: dup.mobileKey || '',
+                email: dup.email || '',
+                country: dup.country || '',
+                city: dup.city || '',
+                source: dup.source || '',
+                status: dup.status || '',
+                interest: dup.interest || '',
+                ownerName: dup.ownerName || '',
+                originalLeadId: dup._id,
+                deletedBy: req.user._id,
+                deletedByName: req.user.name || '',
+                leadCreatedAt: dup.createdAt || null,
+            });
+        } catch (err) {
+            console.error('[lead] failed to archive merged-away lead:', err.message);
+        }
+    }
+
+    await keepLead.save();
+    await Lead.deleteMany({ _id: { $in: duplicates.map((d) => d._id) } });
+
+    res.json({
+        success: true,
+        message: `Merged ${duplicates.length} duplicate lead(s) into "${keepLead.name}".`,
+        lead: keepLead,
+        mergedCallLogs,
+        mergedNotes,
+    });
+});
+
+
 // The lead's contact number is preserved in the append-only DeletedContact
 // archive first, so it stays available in the "Deleted Contacts" report even
 // after the lead itself is removed.

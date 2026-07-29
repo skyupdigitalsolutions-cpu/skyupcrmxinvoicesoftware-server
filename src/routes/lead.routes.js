@@ -11,6 +11,8 @@ import {
     convertLead,
     deleteLead,
     listDeletedContacts,
+    listDuplicateLeads,
+    mergeLeads,
 } from '../controllers/lead.controller.js';
 import { protect, authorize } from '../middleware/auth.js';
 
@@ -26,6 +28,11 @@ router.get('/lookup', lookupByPhone);
 // ── Deleted contacts report (admin only) ─────────────────────────────────────
 // Two-segment path, declared before /:id so it isn't caught by the param route.
 router.get('/deleted/report', authorize('admin'), listDeletedContacts);
+
+// ── Duplicate leads: find & merge (admin only) ───────────────────────────────
+// Two-segment paths, declared before /:id so they aren't caught by the param route.
+router.get('/duplicates', authorize('admin'), listDuplicateLeads);
+router.post('/merge', authorize('admin'), mergeLeads);
 
 // ── CRUD ──────────────────────────────────────────────────────────────────────
 router.get('/', listLeads);
