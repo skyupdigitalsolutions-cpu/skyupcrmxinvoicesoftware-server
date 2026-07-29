@@ -1,10 +1,31 @@
 import mongoose from 'mongoose';
 
 // ── phone normaliser ────────────────────────────────────────────────────────
-// Maps country names to calling codes (matching the client-side list)
+// Maps country names to calling codes — kept in sync with the client's
+// COUNTRY_CODES map (client/src/utils/format.js) so a lead's dedup key
+// (mobileKey) is computed identically wherever the country was entered.
+// Previously this only covered 8 countries; any country outside that list
+// silently fell back to '971' (UAE), which is wrong for the number itself
+// and, if a customer's country was recorded inconsistently between two
+// submissions, could compute a different key each time and produce
+// duplicate lead records instead of matching an existing one.
 const DIAL = {
-  UAE: '971', 'Saudi Arabia': '966', Kuwait: '965', Qatar: '974',
-  Bahrain: '973', Oman: '968', India: '91', Other: '',
+  UAE: '971', 'Saudi Arabia': '966', Kuwait: '965', Qatar: '974', Bahrain: '973',
+  Oman: '968', Iran: '98', Iraq: '964', Syria: '963', Yemen: '967', Lebanon: '961',
+  Georgia: '995', India: '91', 'Sri Lanka': '94', 'United Kingdom': '44',
+  Egypt: '20', Sudan: '249', 'South Sudan': '211', Libya: '218', Algeria: '213',
+  Morocco: '212', Tunisia: '216', Angola: '244', Benin: '229', Botswana: '267',
+  'Burkina Faso': '226', Burundi: '257', Cameroon: '237', 'Cape Verde': '238',
+  'Central African Republic': '236', Chad: '235', Comoros: '269',
+  'Congo (Republic)': '242', 'Congo (DRC)': '243', Djibouti: '253',
+  'Equatorial Guinea': '240', Eritrea: '291', Eswatini: '268', Ethiopia: '251',
+  Gabon: '241', Gambia: '220', Ghana: '233', Guinea: '224', 'Guinea-Bissau': '245',
+  'Ivory Coast': '225', Kenya: '254', Lesotho: '266', Liberia: '231',
+  Madagascar: '261', Malawi: '265', Mali: '223', Mauritania: '222', Mauritius: '230',
+  Mozambique: '258', Namibia: '264', Niger: '227', Nigeria: '234', Rwanda: '250',
+  'Sao Tome and Principe': '239', Senegal: '221', Seychelles: '248',
+  'Sierra Leone': '232', Somalia: '252', 'South Africa': '27', Tanzania: '255',
+  Togo: '228', Uganda: '256', Zambia: '260', Zimbabwe: '263', Other: '',
 };
 
 export function normalizePhone(raw, country = 'UAE') {
