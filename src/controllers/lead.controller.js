@@ -184,24 +184,48 @@ export const createLead = asyncHandler(async(req, res) => {
         }
     }
 
-    const lead = await Lead.create({
-        company: companyId,
-        name,
-        mobile,
-        altMobile,
-        altCountry: altCountry || country,
-        country,
-        city,
-        email,
-        source,
-        campaign,
-        interest,
-        remark,
-        delivery,
-        status: status || 'New',
-        owner: ownerId,
-        ownerName,
-    });
+    let lead;
+    try {
+        lead = await Lead.create({
+            company: companyId,
+            name,
+            mobile,
+            altMobile,
+            altCountry: altCountry || country,
+            country,
+            city,
+            email,
+            source,
+            campaign,
+            interest,
+            remark,
+            delivery,
+            status: status || 'New',
+            owner: ownerId,
+            ownerName,
+        });
+    } catch (err) {
+        // The unique (company, mobileKey) index is the real guarantee against
+        // duplicates — it can reject an insert here even if the pre-check
+        // above raced with another near-simultaneous request. Converted to
+        // the same friendly duplicate response as the pre-check, rather than
+        // a raw 500, so the caller (e.g. the Order Form) handles it identically.
+        if (err && err.code === 11000) {
+            const key = normalizePhone(mobile, country);
+            const existing = key ? await Lead.findOne({ mobileKey: key, company: companyId }) : null;
+            return res.status(409).json({
+                success: false,
+                message: 'A lead with this phone number already exists.',
+                details: {
+                    duplicate: true,
+                    leadId: existing ? existing._id : null,
+                    ownedByMe: existing ? String(existing.owner) === String(req.user._id) : false,
+                    ownerName: existing ? existing.ownerName : '',
+                },
+            });
+        }
+        throw err;
+    }
 
     res.status(201).json({ success: true, lead });
 });

@@ -142,6 +142,18 @@ leadSchema.pre('save', function (next) {
 });
 
 // Phone dedup is per-company: the same number may exist for different tenants.
-leadSchema.index({ company: 1, mobileKey: 1 });
+// UNIQUE (not just indexed) — this is a hard database-level guarantee that
+// two leads in the same company can never share a phone number, regardless
+// of any application-level race condition (e.g. two near-simultaneous
+// requests both passing a "does this exist?" check before either commits).
+// The application-level duplicate check in lead.controller.js still runs
+// first for a fast, friendly error message — this index is the backstop that
+// makes a duplicate structurally impossible even if that check is ever
+// bypassed or raced. Partial so leads with no phone number (mobileKey: '')
+// never collide with each other.
+leadSchema.index(
+  { company: 1, mobileKey: 1 },
+  { unique: true, partialFilterExpression: { mobileKey: { $ne: '' } } }
+);
 
 export const Lead = mongoose.model('Lead', leadSchema);
