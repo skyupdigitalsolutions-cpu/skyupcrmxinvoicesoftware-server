@@ -162,3 +162,18 @@ leadSchema.index(
 );
 
 export const Lead = mongoose.model('Lead', leadSchema);
+
+// MongoDB silently REFUSES to build a unique index if duplicate data already
+// violates it (e.g. leftover dupes from before this index existed, or a
+// migration/manual edit that reintroduced one). Mongoose only reports that
+// failure via this 'index' event — not a thrown error, not an unhandled
+// rejection — so without this listener a broken duplicate-phone guarantee
+// would fail completely silently. Run checkDuplicateIndex.js if this fires.
+Lead.on('index', (err) => {
+  if (err) {
+    console.error(
+      '[Lead] ✗ Index build failed — the unique (company, mobileKey) duplicate-phone guarantee may NOT be active:',
+      err.message
+    );
+  }
+});

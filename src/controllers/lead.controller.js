@@ -139,11 +139,16 @@ export const createLead = asyncHandler(async(req, res) => {
     // City is mandatory: city-wise reporting for outdoor sales depends on it.
     if (!city || !String(city).trim()) throw new ApiError(400, 'City is required');
 
+    // Resolve the target company up front (not just req.user.company, which
+    // is empty for the developer role) so the duplicate guard checks the
+    // SAME company the lead will actually be created in.
+    const companyId = tenantCompanyId(req);
+
     // Duplicate phone guard
     if (mobile && mobile.trim()) {
         const key = normalizePhone(mobile, country);
         if (key) {
-            const existing = await Lead.findOne({ mobileKey: key, company: req.user.company });
+            const existing = await Lead.findOne({ mobileKey: key, company: companyId });
             if (existing) {
                 const ownedByMe = String(existing.owner) === String(req.user._id);
                 return res.status(409).json({
@@ -173,7 +178,6 @@ export const createLead = asyncHandler(async(req, res) => {
     }
 
     // Enforce the company's lead limit (0 = unlimited).
-    const companyId = tenantCompanyId(req);
     const company = await Company.findById(companyId);
     if (!company) throw new ApiError(404, 'Company not found');
     const leadLimit = (company.limits && company.limits.maxLeads) ? company.limits.maxLeads : 0;
@@ -231,6 +235,14 @@ export const createLead = asyncHandler(async(req, res) => {
 });
 
 // ── Update core fields (owner or admin only) ──────────────────────────────────
+// NOTE: `mobile` / `country` are deliberately NOT in the editable fields below.
+// A lead's phone number is immutable once created — enforced in the UI (the
+// Mobile input is read-only on edit) and mirrored here so the same rule holds
+// for any direct API call too. This is what keeps the company-wide "one lead
+// per phone number" guarantee airtight: the only way a mobileKey is ever set
+// is at createLead time, where it's guarded by both a pre-check and the
+// unique (company, mobileKey) index. If the number is genuinely wrong, use
+// deleteLead + createLead (or mergeLeads) instead of changing it in place.
 export const updateLead = asyncHandler(async(req, res) => {
     const lead = await Lead.findOne({ _id: req.params.id, ...tenantScope(req) });
     if (!lead) throw new ApiError(404, 'Lead not found');
@@ -240,7 +252,7 @@ export const updateLead = asyncHandler(async(req, res) => {
         throw new ApiError(403, 'Only the lead owner or an admin can edit core details');
     }
 
-    const fields = ['name', 'mobile', 'altMobile', 'altCountry', 'country', 'city', 'email', 'source', 'campaign', 'interest', 'remark', 'delivery', 'status', 'followUpAt'];
+    const fields = ['name', 'altMobile', 'altCountry', 'city', 'email', 'source', 'campaign', 'interest', 'remark', 'delivery', 'status', 'followUpAt'];
 
     // Capture the diff BEFORE applying changes, so the history/notification
     // reflect exactly what this save actually changed.
