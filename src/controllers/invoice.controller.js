@@ -8,6 +8,7 @@ import { Counter } from '../models/Counter.js';
 import { generateInvoicePdf } from '../utils/invoicePdf.js';
 import { uploadPdfToCloudinary, deletePdfFromCloudinary } from '../utils/cloudinary.js';
 import { tenantScope, tenantCompanyId } from '../middleware/auth.js';
+import { phoneSearchCandidates } from '../utils/phone.js';
 
 // Sales users only ever touch invoices they created; admin/developer see the
 // whole tenant. Applied to reads AND mutations so a salesperson can neither
@@ -84,6 +85,11 @@ export const listInvoices = asyncHandler(async(req, res) => {
         const rx = new RegExp(String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
         q.$or = [{ customer: rx }];
         if (/^\d+$/.test(search)) q.$or.push({ invoiceNo: Number(search) }, { orderNo: Number(search) });
+        // Phone-aware search: Invoice has no normalised mobileKey, so match
+        // the free-text mobile field tolerant of country code, leading
+        // zero, and punctuation differences.
+        const phone = phoneSearchCandidates(search);
+        if (phone) phone.rawFieldRegexes.forEach((r) => q.$or.push({ mobile: r }));
     }
     const invoices = await Invoice.find(q).sort({ createdAt: -1 }).limit(500);
     res.json({ success: true, invoices });

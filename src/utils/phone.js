@@ -26,3 +26,62 @@ export function toE164(mobile, country) {
     if (!code) return '';
     return `${code}${digits}`;
 }
+
+const escapeRx = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// ── Free-text phone search ───────────────────────────────────────────────────
+// Turns whatever a user types into a search box — "+971 50 673 1305",
+// "00971506731305", "0506731305", "506731305", "506-731-305" — into match
+// candidates, so search never depends on the caller typing the country code
+// (or not), a leading trunk zero (or not), or any particular punctuation.
+//
+// Returns null if the input has fewer than 3 digits (too short to be a
+// meaningful phone search — avoids over-matching on plain text searches that
+// happen to contain a digit or two).
+//
+//   mobileKeyRegex   — for a normalised `mobileKey` field (digits only,
+//                       country code, no leading zero — see Lead.js /
+//                       normalizePhone). A plain "contains" match already
+//                       handles country-code-or-not and leading-zero-or-not,
+//                       since both variants are always substrings of the key.
+//   rawFieldRegexes  — for a free-text `mobile` field that may still contain
+//                       spaces/dashes/parens and may or may not include the
+//                       country code (Order.mobile / Invoice.mobile — these
+//                       models don't store a normalised key). Each candidate
+//                       allows any run of non-digit characters between
+//                       digits, so formatting differences never block a
+//                       match; multiple digit-variants are tried since we
+//                       don't know whether the stored value has the country
+//                       code, a leading zero, neither, or both.
+export function phoneSearchCandidates(raw) {
+    const digits = String(raw || '').replace(/\D/g, '');
+    if (digits.length < 3) return null;
+
+    // Repeatedly try each reduction (00-prefix, leading trunk zero, known
+    // dial code) against every variant found so far, until nothing new turns
+    // up — handles combinations like "00" + country code together, not just
+    // a single reduction off the raw digits.
+    const variants = new Set([digits]);
+    let grew = true;
+    while (grew) {
+        grew = false;
+        for (const v of [...variants]) {
+            const candidates = [];
+            if (v.startsWith('00')) candidates.push(v.slice(2));
+            if (v.startsWith('0')) candidates.push(v.slice(1));
+            Object.values(DIAL_CODES).forEach((code) => {
+                if (code && v.startsWith(code) && v.length > code.length) candidates.push(v.slice(code.length));
+            });
+            for (const c of candidates) {
+                if (c && !variants.has(c)) { variants.add(c); grew = true; }
+            }
+        }
+    }
+
+    const mobileKeyRegex = new RegExp([...variants].map(escapeRx).join('|'));
+    const rawFieldRegexes = [...variants].map(
+        (v) => new RegExp(v.split('').map(escapeRx).join('\\D*'))
+    );
+
+    return { digits, mobileKeyRegex, rawFieldRegexes };
+}

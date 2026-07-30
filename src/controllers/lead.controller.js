@@ -1,6 +1,7 @@
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { ApiError } from '../utils/ApiError.js';
 import { Lead, normalizePhone } from '../models/Lead.js';
+import { phoneSearchCandidates } from '../utils/phone.js';
 import { DeletedContact } from '../models/DeletedContact.js';
 import { Counter } from '../models/Counter.js';
 import { Order } from '../models/Order.js';
@@ -100,6 +101,11 @@ export const listLeads = asyncHandler(async(req, res) => {
     if (search) {
         const rx = new RegExp(String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
         q.$or = [{ name: rx }, { mobile: rx }, { email: rx }, { city: rx }];
+        // Phone-aware search: matches regardless of whether the typed number
+        // includes the country code, a leading trunk zero, or any punctuation
+        // — see phoneSearchCandidates for why this needs its own handling.
+        const phone = phoneSearchCandidates(search);
+        if (phone) q.$or.push({ mobileKey: phone.mobileKeyRegex });
     }
 
     const leads = await Lead.find(q).sort({ createdAt: -1 }).limit(500);
@@ -601,6 +607,8 @@ export const listDeletedContacts = asyncHandler(async(req, res) => {
     if (search) {
         const rx = new RegExp(String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
         q.$or = [{ name: rx }, { mobile: rx }, { city: rx }, { email: rx }];
+        const phone = phoneSearchCandidates(search);
+        if (phone) q.$or.push({ mobileKey: phone.mobileKeyRegex });
     }
 
     const contacts = await DeletedContact.find(q).sort({ createdAt: -1 }).limit(1000).lean();

@@ -2,6 +2,7 @@ import { asyncHandler } from '../utils/asyncHandler.js';
 import { ApiError } from '../utils/ApiError.js';
 import { Order, DELIVERY_STATUSES } from '../models/Order.js';
 import { normalizePhone } from '../models/Lead.js';
+import { phoneSearchCandidates } from '../utils/phone.js';
 import { User } from '../models/User.js';
 import { Counter } from '../models/Counter.js';
 import { tenantScope, tenantCompanyId } from '../middleware/auth.js';
@@ -40,6 +41,11 @@ export const listOrders = asyncHandler(async(req, res) => {
         const rx = new RegExp(String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
         q.$or = [{ customer: rx }, { city: rx }];
         if (/^\d+$/.test(search)) q.$or.push({ orderNo: Number(search) });
+        // Phone-aware search: Order has no normalised mobileKey, so match
+        // the free-text mobile field tolerant of country code, leading
+        // zero, and punctuation differences.
+        const phone = phoneSearchCandidates(search);
+        if (phone) phone.rawFieldRegexes.forEach((r) => q.$or.push({ mobile: r }));
     }
 
     const orders = await Order.find(q).sort({ createdAt: -1 }).limit(500);
