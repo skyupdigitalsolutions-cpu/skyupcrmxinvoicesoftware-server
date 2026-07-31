@@ -452,72 +452,66 @@ export const relinkContact = asyncHandler(async (req, res) => {
 export const webhook = asyncHandler(async (req, res) => {
     const secret = process.env.WHATSAPP_WEBHOOK_SECRET || '';
     if (secret && req.query.token !== secret) {
-        // Acknowledge with 200 regardless so MSG91 doesn't retry forever on a
-        // misconfigured secret, but do nothing.
         return res.json({ success: true, ignored: true });
     }
 
     const body = req.body || {};
+    console.log('[webhook] raw payload:', JSON.stringify(body, null, 2));
+
     const entries = Array.isArray(body.entry) ? body.entry : (Array.isArray(body) ? body : [body]);
 
     for (const entry of entries) {
-        const from = entry.from || (entry.contact && entry.contact.wa_id) || '';
-        const toNumber = entry.integrated_number || entry.to || '';
-        const statusValue = entry.status || (entry.type === 'status' ? entry.status : '');
-        const requestId = entry.request_id || entry.msg_id || entry.message_id || '';
-        const text = (entry.text && entry.text.body) || entry.body || '';
+        const from        = entry.customerNumber || entry.from || (entry.contact && entry.contact.wa_id) || '';
+        const toNumber    = entry.integratedNumber || entry.integrated_number || entry.to || '';
+        const requestId   = entry.requestId || entry.request_id || entry.msg_id || entry.message_id || '';
+        const statusValue = entry.reason || entry.status || (entry.type === 'status' ? entry.status : '');
+        const text        = (typeof entry.text === 'string' ? entry.text : (entry.text && entry.text.body)) || entry.body || entry.caption || '';
+        const contactName = entry.customerName || '';
+        const mediaUrl      = entry.url || '';
+        const mediaType     = entry.messageType || '';
+        const mediaFilename = entry.filename || '';
 
         if (!from && !requestId) continue;
 
-        // Route to the right tenant by matching the number the message was
-        // sent to/from against each company's configured integratedNumber.
         const company = toNumber
             ? await Company.findOne({ 'msg91.integratedNumber': toNumber })
             : null;
 
         if (statusValue && requestId) {
-            // Delivery/read status update for a message we sent.
-            const mapped = statusValue === 'delivered' ? 'delivered' : statusValue === 'read' ? 'read' : statusValue === 'failed' ? 'failed' : null;
+            const mapped = statusValue === 'delivered' ? 'delivered'
+                : statusValue === 'read' ? 'read'
+                : statusValue === 'failed' ? 'failed'
+                : null;
             if (mapped) {
                 await WhatsAppMessage.updateOne({ msg91RequestId: requestId }, { $set: { status: mapped } });
             }
             continue;
         }
 
-        if (from && text) {
-            // Inbound reply — match to a lead in the routed company (or any
-            // company if we couldn't resolve one from the number). mobileKey
-            // is stored as country-code + local number with no leading zero
-            // (see Lead.js normalizePhone), matching MSG91's "from" format —
-            // try an exact match first, then fall back to a last-9-digit
-            // match for edge cases (e.g. a custom country code we don't know).
+        if (from && (text || mediaUrl)) {
             const digits = String(from).replace(/\D/g, '');
             const leadQuery = company ? { company: company._id } : {};
             let lead = await Lead.findOne({ ...leadQuery, mobileKey: digits });
             if (!lead && digits.length >= 9) {
                 lead = await Lead.findOne({ ...leadQuery, mobileKey: new RegExp(`${digits.slice(-9)}$`) });
             }
+
             if (lead) {
                 await WhatsAppMessage.create({
                     company: lead.company, lead: lead._id,
-                    contactName: lead.name, contactNumber: digits, contactCountry: lead.country,
+                    contactName: contactName || lead.name,
+                    contactNumber: digits, contactCountry: lead.country,
                     direction: 'in', kind: 'session',
-                    text, status: 'replied',
+                    text: text || '',
+                    mediaUrl: mediaUrl || '',
+                    mediaType: mediaType || '',
+                    mediaFilename: mediaFilename || '',
+                    status: 'replied',
                 });
-                // Flip the most recent outbound message for this lead to "replied"
-                // so the conversations table reflects an active response.
-                const lastOut = await WhatsAppMessage.findOne({ lead: lead._id, direction: 'out' }).sort({ createdAt: -1 });
-                if (lastOut) {
-                    lastOut.status = 'replied';
-                    await lastOut.save();
-                }
 
-                // A reply is a genuine sign of engagement — advance the lead
-                // from "Lead" stage to "Opportunity" (status: 'Contacted').
-                // Only moves a lead OUT of the earliest stage; never touches
-                // one already further along (Follow-up/Interested) or in a
-                // terminal state (Won/Lost/converted), so a reply can't
-                // silently downgrade or override progress already made.
+                const lastOut = await WhatsAppMessage.findOne({ lead: lead._id, direction: 'out' }).sort({ createdAt: -1 });
+                if (lastOut) { lastOut.status = 'replied'; await lastOut.save(); }
+
                 if (lead.status === 'New') {
                     lead.status = 'Contacted';
                     lead.editHistory.push({
@@ -528,51 +522,43 @@ export const webhook = asyncHandler(async (req, res) => {
                     await lead.save();
                 }
 
-                // Notify the lead's owner + company admins that a reply came in,
-                // via the same notification bell used for follow-up/cheque reminders.
                 try {
                     const recipients = await ownerAndAdmins(lead.company, lead.owner);
-                    const preview = text.length > 80 ? `${text.slice(0, 80)}…` : text;
+                    const preview = text ? (text.length > 80 ? `${text.slice(0, 80)}…` : text) : `[${mediaType || 'media'} received]`;
                     await notifyUsers({
-                        company: lead.company,
-                        recipients,
+                        company: lead.company, recipients,
                         type: 'whatsapp-reply',
                         title: `${lead.name} replied on WhatsApp`,
-                        body: preview,
-                        link: '/communication',
+                        body: preview, link: '/communication',
                     });
                 } catch (notifyErr) {
                     console.error('[whatsapp] Reply notification FAILED:', notifyErr.message);
                 }
+
             } else if (company) {
-                // No lead matches this number, but we know which company it
-                // belongs to (via the integrated number) — log the reply
-                // anyway instead of silently dropping it, so it shows up in
-                // the Communication page as "Not yet a lead" with an option
-                // to add them as one using this reply's details.
                 await WhatsAppMessage.create({
                     company: company._id, lead: null,
-                    contactName: '', contactNumber: digits, contactCountry: '',
+                    contactName: contactName || '',
+                    contactNumber: digits, contactCountry: '',
                     direction: 'in', kind: 'session',
-                    text, status: 'replied',
+                    text: text || '',
+                    mediaUrl: mediaUrl || '',
+                    mediaType: mediaType || '',
+                    mediaFilename: mediaFilename || '',
+                    status: 'replied',
                 });
-                const lastOut = await WhatsAppMessage.findOne({ company: company._id, contactNumber: digits, lead: null, direction: 'out' }).sort({ createdAt: -1 });
-                if (lastOut) {
-                    lastOut.status = 'replied';
-                    await lastOut.save();
-                }
 
-                // No lead owner exists yet — notify every admin instead.
+                const lastOut = await WhatsAppMessage.findOne({ company: company._id, contactNumber: digits, lead: null, direction: 'out' }).sort({ createdAt: -1 });
+                if (lastOut) { lastOut.status = 'replied'; await lastOut.save(); }
+
                 try {
                     const admins = await adminsOf(company._id);
-                    const preview = text.length > 80 ? `${text.slice(0, 80)}…` : text;
+                    const preview = text ? (text.length > 80 ? `${text.slice(0, 80)}…` : text) : `[${mediaType || 'media'} received]`;
                     await notifyUsers({
-                        company: company._id,
-                        recipients: admins,
+                        company: company._id, recipients: admins,
                         type: 'whatsapp-reply-unlinked',
                         title: `${digits} replied on WhatsApp — not yet a lead`,
-                        body: preview,
-                        link: '/communication',
+                        body: preview, link: '/communication',
                     });
                 } catch (notifyErr) {
                     console.error('[whatsapp] Unlinked-reply notification FAILED:', notifyErr.message);
