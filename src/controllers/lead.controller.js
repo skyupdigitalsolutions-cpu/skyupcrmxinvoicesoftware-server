@@ -58,9 +58,25 @@ export const lookupByPhone = asyncHandler(async(req, res) => {
         return res.json({ success: true, exists: false });
     }
 
-    const lead = await Lead.findOne({ mobileKey: key, ...tenantScope(req) }).select(
+    // Primary lookup: exact mobileKey (correct country code prepended).
+    let lead = await Lead.findOne({ mobileKey: key, ...tenantScope(req) }).select(
         'name mobile country city status interest remark delivery callLogs notes owner ownerName converted orderNo createdAt'
     );
+
+    // Fallback: if not found by exact key, search by raw digit suffix.
+    // This catches existing leads whose mobileKey was computed with the wrong
+    // dial code (e.g. '971' UAE fallback instead of the correct country code)
+    // due to the case-sensitivity bug that has now been fixed. Without this,
+    // those leads would never match and would keep generating duplicates.
+    if (!lead) {
+        const rawDigits = mobile.replace(/\D/g, '');
+        if (rawDigits.length >= 6) {
+            const suffixRegex = new RegExp(rawDigits.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$');
+            lead = await Lead.findOne({ mobileKey: suffixRegex, ...tenantScope(req) }).select(
+                'name mobile country city status interest remark delivery callLogs notes owner ownerName converted orderNo createdAt'
+            );
+        }
+    }
 
     if (!lead) return res.json({ success: true, exists: false });
 
@@ -153,21 +169,29 @@ export const createLead = asyncHandler(async(req, res) => {
     // Duplicate phone guard
     if (mobile && mobile.trim()) {
         const key = normalizePhone(mobile, country);
-        if (key) {
-            const existing = await Lead.findOne({ mobileKey: key, company: companyId });
-            if (existing) {
-                const ownedByMe = String(existing.owner) === String(req.user._id);
-                return res.status(409).json({
-                    success: false,
-                    message: 'A lead with this phone number already exists.',
-                    details: {
-                        duplicate: true,
-                        leadId: existing._id,
-                        ownedByMe,
-                        ownerName: existing.ownerName,
-                    },
-                });
+        // Primary check: exact mobileKey match.
+        let existing = key ? await Lead.findOne({ mobileKey: key, company: companyId }) : null;
+        // Fallback: raw digit suffix match — catches leads stored with a wrong
+        // dial code (from the now-fixed case-sensitivity bug in normalizePhone).
+        if (!existing) {
+            const rawDigits = String(mobile).replace(/\D/g, '');
+            if (rawDigits.length >= 6) {
+                const suffixRegex = new RegExp(rawDigits.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$');
+                existing = await Lead.findOne({ mobileKey: suffixRegex, company: companyId });
             }
+        }
+        if (existing) {
+            const ownedByMe = String(existing.owner) === String(req.user._id);
+            return res.status(409).json({
+                success: false,
+                message: 'A lead with this phone number already exists.',
+                details: {
+                    duplicate: true,
+                    leadId: existing._id,
+                    ownedByMe,
+                    ownerName: existing.ownerName,
+                },
+            });
         }
     }
 

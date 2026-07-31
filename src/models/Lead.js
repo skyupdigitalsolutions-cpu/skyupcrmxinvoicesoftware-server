@@ -28,12 +28,24 @@ const DIAL = {
   Togo: '228', Uganda: '256', Zambia: '260', Zimbabwe: '263', Other: '',
 };
 
+// Case-insensitive lookup: 'iran', 'IRAN', 'Iran' all resolve correctly.
+// This prevents the silent '971' fallback that was the root cause of duplicate
+// mobileKeys when country names were stored with inconsistent capitalisation.
+const DIAL_LOWER = Object.fromEntries(
+  Object.entries(DIAL).map(([k, v]) => [k.toLowerCase(), v])
+);
+function dialCode(country) {
+  if (!country) return '971';
+  const code = DIAL[country] ?? DIAL_LOWER[String(country).toLowerCase()];
+  return code !== undefined ? code : '971';
+}
+
 export function normalizePhone(raw, country = 'UAE') {
   if (!raw) return '';
   let p = String(raw).replace(/[^\d]/g, '');
   if (!p) return '';
   if (p.startsWith('0')) p = p.slice(1);           // strip leading zero
-  const code = DIAL[country] || '971';
+  const code = dialCode(country);
   if (code && !p.startsWith(code)) p = code + p;  // prepend country code
   return p;
 }
@@ -46,7 +58,7 @@ export function displayPhone(raw, country = 'UAE') {
   let p = String(raw).replace(/[^\d]/g, '');
   if (!p) return String(raw);
   if (p.startsWith('0')) p = p.slice(1);
-  const code = DIAL[country] || '971';
+  const code = dialCode(country);
   if (!code) return String(raw);
   if (p.startsWith(code)) return `+${code} ${p.slice(code.length)}`;
   return `+${code} ${p}`;
