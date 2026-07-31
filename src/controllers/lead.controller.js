@@ -91,7 +91,7 @@ export const lookupByPhone = asyncHandler(async(req, res) => {
 
 // ── List all leads visible to the user ───────────────────────────────────────
 export const listLeads = asyncHandler(async(req, res) => {
-    const { search, status, source, converted, page, limit: limitQ } = req.query;
+    const { search, status, source, converted } = req.query;
     const q = {...ownerScope(req) };
 
     if (status) q.status = status;
@@ -108,30 +108,14 @@ export const listLeads = asyncHandler(async(req, res) => {
         if (phone) q.$or.push({ mobileKey: phone.mobileKeyRegex });
     }
 
-    // Support pagination via ?page=1&limit=200 — defaults to no cap (all leads)
-    // so existing callers that don't pass pagination get all their leads.
-    // The old hardcoded .limit(500) was cutting off companies with >500 leads.
-    const pageNum  = Math.max(1, parseInt(page)  || 1);
-    const limitNum = Math.min(5000, Math.max(1, parseInt(limitQ) || 0));
-
-    const query = Lead.find(q).sort({ createdAt: -1 });
-    if (limitNum > 0) {
-        query.skip((pageNum - 1) * limitNum).limit(limitNum);
-    }
-    // limitNum === 0 means no limit — fetch all (safe because ownerScope already
-    // scopes to one company, and mongoose can handle a few thousand docs fine).
-
-    const [leads, total] = await Promise.all([
-        query,
-        Lead.countDocuments(q),
-    ]);
+    const leads = await Lead.find(q).sort({ createdAt: -1 }).limit(500);
 
     // Edit history is admin-only — strip it out for sales users' own view.
     const out = req.user.role === 'admin' ?
         leads :
         leads.map((l) => { const o = l.toObject(); delete o.editHistory; return o; });
 
-    res.json({ success: true, leads: out, total, page: pageNum, limit: limitNum || total });
+    res.json({ success: true, leads: out });
 });
 
 // ── Get single lead (owner OR any authenticated user — for cross-employee view) ──
