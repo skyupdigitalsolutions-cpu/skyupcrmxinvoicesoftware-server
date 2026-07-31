@@ -108,7 +108,7 @@ export const listLeads = asyncHandler(async(req, res) => {
         if (phone) q.$or.push({ mobileKey: phone.mobileKeyRegex });
     }
 
-    const leads = await Lead.find(q).sort({ createdAt: -1 }).limit(500);
+    const leads = await Lead.find(q).sort({ createdAt: -1 });
 
     // Edit history is admin-only — strip it out for sales users' own view.
     const out = req.user.role === 'admin' ?
