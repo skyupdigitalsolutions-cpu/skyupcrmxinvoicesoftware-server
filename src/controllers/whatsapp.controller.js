@@ -108,12 +108,6 @@ export const deleteTemplate = asyncHandler(async (req, res) => {
 });
 
 // ── Sending a template to one or more leads AND/OR raw CSV contacts ─────────
-// `leadIds` sends to existing leads as before. `contacts` (new) sends
-// directly to numbers imported from a CSV that don't match any existing
-// lead yet — nothing requires them to be added as a lead first. Once one of
-// them replies, the Communication page prompts to add them as a lead (see
-// the webhook handler and relinkContact below); until then their messages
-// are tracked by phone number alone (lead: null).
 export const sendTemplate = asyncHandler(async (req, res) => {
     const { leadIds, contacts, templateName, language, variables, autoFillNameVar } = req.body || {};
     const hasLeadIds = Array.isArray(leadIds) && leadIds.length > 0;
@@ -161,7 +155,7 @@ export const sendTemplate = asyncHandler(async (req, res) => {
         }
     }
 
-    // ── Raw contacts that aren't leads yet (from CSV import) ─────────────────
+    // ── Raw contacts (from CSV import) ────────────────────────────────────────
     if (hasContacts) {
         for (const c of contacts) {
             const country = c.country || 'UAE';
@@ -229,21 +223,12 @@ export const sendReply = asyncHandler(async (req, res) => {
             company: companyId, lead: lead._id, direction: 'out', kind: 'session',
             text, status: 'failed', error: err.message || 'Send failed', sentBy: req.user._id,
         });
-        // 'message' here is a plain STRING (not the saved record — that's
-        // 'savedMessage' below) because the client's apiError() helper reads
-        // response.data.message as the error text for every endpoint's
-        // toasts. Without it, the toast falls back to axios's generic
-        // "Request failed with status code 502" instead of the real reason.
         const reason = err.message || 'Send failed';
         res.status(502).json({ success: false, message: reason, error: reason, savedMessage: msg.toSafeJSON() });
     }
 });
 
 // ── Manual continue-chat: send an image/document/video/audio attachment ─────
-// The file arrives as a base64 data URL (same pattern as company logo
-// uploads), gets hosted on Cloudinary first (WhatsApp/MSG91 need a public
-// URL, not raw bytes), then sent via MSG91. Subject to the same 24h
-// session-window rule as a free-text reply.
 export const sendMedia = asyncHandler(async (req, res) => {
     const { leadId, dataUrl, mediaType, filename, caption } = req.body || {};
     if (!leadId || !dataUrl) throw new ApiError(400, 'Lead and a file are required.');
@@ -294,10 +279,6 @@ export const sendMedia = asyncHandler(async (req, res) => {
 });
 
 // ── Conversation log for the Communication page ──────────────────────────────
-// One row per lead OR per raw contact number (for numbers sent to directly
-// from a CSV import that aren't leads yet) — this is the "all leads' shared
-// template and their response" table, extended to also surface not-yet-lead
-// contacts so a reply from one of them is never invisible.
 export const listConversations = asyncHandler(async (req, res) => {
     const q = { ...tenantScope(req) };
     const messages = await WhatsAppMessage.find(q).sort({ createdAt: -1 }).limit(2000).lean();
@@ -322,11 +303,6 @@ export const listConversations = asyncHandler(async (req, res) => {
     const leads = await Lead.find({ _id: { $in: leadIds } }).select('name mobile country stage status owner').lean();
     const leadById = new Map(leads.map((l) => [String(l._id), l]));
 
-    // Employees only see LEAD conversations they themselves added/own — same
-    // restriction already applied to the main Leads list for the 'sales'
-    // role. Not-yet-lead contact rows have no owner to check yet, so they
-    // stay visible to whoever sent to them until someone converts one to a
-    // lead (from that point on, normal ownership rules apply).
     const restrictToOwner = req.user.role === 'sales';
 
     const rows = [...byKey.entries()]
@@ -362,8 +338,6 @@ export const listConversations = asyncHandler(async (req, res) => {
             };
         })
         .filter(Boolean)
-        // Unread conversations always float to the top, regardless of timestamp,
-        // so a new reply is never buried under older but more recent sends.
         .sort((a, b) => {
             if (a.unread !== b.unread) return a.unread ? -1 : 1;
             return new Date(b.lastSentAt || b.lastResponseAt || 0) - new Date(a.lastSentAt || a.lastResponseAt || 0);
@@ -380,23 +354,16 @@ export const getThread = asyncHandler(async (req, res) => {
     if (!lead) throw new ApiError(404, 'Lead not found');
     const messages = await WhatsAppMessage.find({ lead: lead._id, ...tenantScope(req) }).sort({ createdAt: 1 });
 
-    // Opening the thread is what counts as "seen" — clear the unread flag on
-    // every inbound message for this lead so it drops out of the "unread"
-    // sort/highlight on the conversations list.
     await WhatsAppMessage.updateMany(
         { lead: lead._id, direction: 'in', seen: false },
         { $set: { seen: true } }
     );
-    // Reflect that in the response too (messages were fetched before the
-    // update above), so the client doesn't see a stale seen:false.
     messages.forEach((m) => { if (m.direction === 'in') m.seen = true; });
 
     res.json({ success: true, lead: { id: lead._id, name: lead.name, mobile: lead.mobile }, messages: messages.map((m) => m.toSafeJSON()) });
 });
 
-// Full thread for a raw contact number that isn't a lead yet (a number sent
-// to directly from a CSV import). Same "mark as seen on open" behavior as
-// getThread above, just keyed by phone number instead of a lead ID.
+// Full thread for a raw contact number that isn't a lead yet.
 export const getThreadByNumber = asyncHandler(async (req, res) => {
     const contactNumber = req.params.contactNumber;
     if (!contactNumber) throw new ApiError(400, 'contactNumber is required.');
@@ -423,11 +390,7 @@ export const getThreadByNumber = asyncHandler(async (req, res) => {
     });
 });
 
-// Once a not-yet-lead contact has been added as a proper lead (via the
-// normal leadApi.create() call, which already handles required-field
-// validation and duplicate-phone checks), this reassigns their prior message
-// history from the raw contactNumber over to the new lead — so nothing from
-// before they were "official" is lost once they are.
+// Reassigns prior message history from raw contactNumber to a new lead.
 export const relinkContact = asyncHandler(async (req, res) => {
     const { contactNumber, leadId } = req.body || {};
     if (!contactNumber || !leadId) throw new ApiError(400, 'contactNumber and leadId are required.');
@@ -447,35 +410,46 @@ export const relinkContact = asyncHandler(async (req, res) => {
 // No auth middleware — MSG91 calls this directly. Verified by a shared secret
 // query param instead (?token=WHATSAPP_WEBHOOK_SECRET, set as an env var).
 // Handles both delivery/read status callbacks and inbound reply messages.
-// MSG91's exact webhook payload shape can vary; this reads defensively from
-// a few common locations rather than assuming one fixed structure.
+//
+// Supports both the new MSG91 flat payload format and the old entry-array format:
+// New format (2026): flat object with top-level sender/text/content_type/integrated_number
+// Old format: { entry: [ { customerNumber, integratedNumber, ... } ] }
 export const webhook = asyncHandler(async (req, res) => {
     const secret = process.env.WHATSAPP_WEBHOOK_SECRET || '';
     // Fail CLOSED: if secret is not configured, reject all webhook calls.
-    // Previously used `if (secret && ...)` which meant an unset secret let
-    // anyone POST fake WhatsApp messages into the CRM with no authentication.
     if (!secret || req.query.token !== secret) {
         return res.json({ success: true, ignored: true });
     }
 
     const body = req.body || {};
-    // Raw payload logging — development only. Never log in production as
-    // it exposes customer phone numbers and message content to server logs.
-    if (process.env.NODE_ENV !== 'production') {
-        console.log('[webhook] raw payload:', JSON.stringify(body, null, 2));
-    }
 
-    const entries = Array.isArray(body.entry) ? body.entry : (Array.isArray(body) ? body : [body]);
+    // Support both new flat format and old entry-array format.
+    // New format has top-level `sender` or `integrated_number`.
+    const isNewFormat = !!body.sender || !!body.integrated_number;
+    const entries = isNewFormat
+        ? [body]
+        : (Array.isArray(body.entry) ? body.entry : (Array.isArray(body) ? body : [body]));
 
     for (const entry of entries) {
-        const from        = entry.customerNumber || entry.from || (entry.contact && entry.contact.wa_id) || '';
-        const toNumber    = entry.integratedNumber || entry.integrated_number || entry.to || '';
-        const requestId   = entry.requestId || entry.request_id || entry.msg_id || entry.message_id || '';
-        const statusValue = entry.reason || entry.status || (entry.type === 'status' ? entry.status : '');
-        const text        = (typeof entry.text === 'string' ? entry.text : (entry.text && entry.text.body)) || entry.body || entry.caption || '';
-        const contactName = entry.customerName || '';
-        const mediaUrl      = entry.url || '';
-        const mediaType     = entry.messageType || '';
+        // New format fields take priority; old format fields are fallbacks.
+        const from        = entry.sender || entry.customerNumber || entry.from || (entry.contact && entry.contact.wa_id) || '';
+        const toNumber    = entry.integrated_number || entry.integratedNumber || entry.to || '';
+        const requestId   = entry.message_uuid || entry.requestId || entry.request_id || entry.msg_id || entry.message_id || '';
+        const statusValue = entry.reason || entry.status || '';
+
+        // Text: new format has top-level `text` string; old format had entry.text.body or entry.body
+        const text = (typeof entry.text === 'string' ? entry.text : (entry.text && entry.text.body))
+                    || (entry.messages && entry.messages[0] && entry.messages[0].text && entry.messages[0].text.body)
+                    || entry.body || entry.caption || '';
+
+        // Contact name: new format uses customer_name; old used customerName
+        const contactName = entry.customer_name || entry.customerName || '';
+
+        // Media: new format uses attachment_url; old used url
+        const mediaUrl      = entry.attachment_url || entry.url || '';
+
+        // Media type: new format uses content_type (but 'text' is not a media type)
+        const mediaType     = (entry.content_type && entry.content_type !== 'text') ? entry.content_type : (entry.messageType || '');
         const mediaFilename = entry.filename || '';
 
         if (!from && !requestId) continue;
@@ -484,6 +458,7 @@ export const webhook = asyncHandler(async (req, res) => {
             ? await Company.findOne({ 'msg91.integratedNumber': toNumber })
             : null;
 
+        // Delivery/read status update
         if (statusValue && requestId) {
             const mapped = statusValue === 'delivered' ? 'delivered'
                 : statusValue === 'read' ? 'read'
