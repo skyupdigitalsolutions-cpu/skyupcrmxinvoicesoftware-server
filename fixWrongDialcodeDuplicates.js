@@ -100,9 +100,7 @@ async function main() {
   console.log(`  Found ${dupGroups.length} duplicate group(s) (same raw digits, different dial code or same).\n`);
 
   if (!dupGroups.length) {
-    console.log('✅ No cross-key duplicates found. Nothing to merge.\n');
-    await mongoose.disconnect();
-    return;
+    console.log('✅ No cross-key duplicates found. Checking for same-key duplicates...\n');
   }
 
   // ── Step 2: Merge each group ──────────────────────────────────────────────
@@ -198,8 +196,60 @@ async function main() {
     }
   }
 
-  // ── Step 3: Fix mobileKeys on all remaining leads (no-duplicate, wrong key) ─
-  console.log('── Step 3: Fixing mobileKey on remaining leads with wrong dial code ──');
+  // ── Step 3: Merge same-mobileKey duplicates (created after mobileKey fix) ──
+  console.log('── Step 3: Merging same-mobileKey duplicates ──');
+  const samekeyGroups = await Lead.aggregate([
+    { $match: { mobileKey: { $gt: '' } } },
+    { $group: { _id: { company: '$company', mobileKey: '$mobileKey' }, ids: { $push: '$_id' }, count: { $sum: 1 } } },
+    { $match: { count: { $gt: 1 } } },
+  ]);
+  console.log(`  Found ${samekeyGroups.length} same-mobileKey duplicate group(s).\n`);
+  let samekeyMerged = 0;
+
+  for (const group of samekeyGroups) {
+    const leads = await Lead.find({ _id: { $in: group.ids } }).sort({ createdAt: 1 });
+    if (leads.length < 2) continue;
+    const keepDoc = leads[0];
+    const dupDocs = leads.slice(1);
+    console.log(`  Group mobileKey: ${group._id.mobileKey}`);
+    console.log(`    keeping: "${keepDoc.name}" (${keepDoc._id}) created ${keepDoc.createdAt.toISOString().slice(0,10)}`);
+
+    for (const dupDoc of dupDocs) {
+      console.log(`    merging: "${dupDoc.name}" (${dupDoc._id})`);
+      if (dupDoc.callLogs?.length)    keepDoc.callLogs.push(...dupDoc.callLogs);
+      if (dupDoc.notes?.length)       keepDoc.notes.push(...dupDoc.notes);
+      if (dupDoc.editHistory?.length) keepDoc.editHistory.push(...dupDoc.editHistory);
+      keepDoc.editHistory.push({
+        by: keepDoc.owner,
+        byName: 'Repair script (fixWrongDialcodeDuplicates)',
+        changes: [{ field: 'merged', from: null, to: `Merged duplicate "${dupDoc.name}" (${dupDoc._id})` }],
+      });
+      await Promise.all([
+        Cheque.updateMany({ lead: dupDoc._id }, { $set: { lead: keepDoc._id } }),
+        WhatsAppMessage.updateMany({ lead: dupDoc._id }, { $set: { lead: keepDoc._id } }),
+        Notification.updateMany({ lead: dupDoc._id }, { $set: { lead: keepDoc._id } }),
+      ]);
+      try {
+        await DeletedContact.create({
+          company: dupDoc.company, name: dupDoc.name || '', mobile: dupDoc.mobile || '',
+          mobileKey: dupDoc.mobileKey || '', email: dupDoc.email || '', country: dupDoc.country || '',
+          city: dupDoc.city || '', source: dupDoc.source || '', status: dupDoc.status || '',
+          interest: dupDoc.interest || '', ownerName: dupDoc.ownerName || '',
+          originalLeadId: dupDoc._id, deletedBy: null,
+          deletedByName: 'Repair script (fixWrongDialcodeDuplicates)', leadCreatedAt: dupDoc.createdAt || null,
+        });
+      } catch (err) { console.warn(`      ⚠ Archive failed: ${err.message}`); }
+      await dupDoc.deleteOne();
+      console.log(`      ✓ Deleted duplicate "${dupDoc.name}"`);
+      samekeyMerged++;
+    }
+    await keepDoc.save();
+    console.log(`    ✓ Saved kept lead\n`);
+  }
+  console.log(`  Same-mobileKey duplicates removed: ${samekeyMerged}\n`);
+
+  // ── Step 4: Fix mobileKeys on remaining leads with wrong dial code ──────────
+  console.log('── Step 4: Fixing mobileKey on remaining leads with wrong dial code ──');
   const remaining = await Lead.find({ mobile: { $exists: true, $ne: '' } }).select('_id mobile country mobileKey');
   let fixedCount = 0;
 
@@ -210,7 +260,6 @@ async function main() {
         await Lead.updateOne({ _id: lead._id }, { $set: { mobileKey: correct } });
         fixedCount++;
       } catch (err) {
-        // If update fails due to unique index conflict, log and skip.
         console.warn(`  ⚠ Could not fix mobileKey for lead ${lead._id} (${lead.mobileKey} → ${correct}): ${err.message}`);
       }
     }
