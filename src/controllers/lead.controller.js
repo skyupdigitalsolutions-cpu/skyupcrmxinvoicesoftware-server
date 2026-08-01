@@ -635,6 +635,10 @@ export const listDeletedContacts = asyncHandler(async(req, res) => {
         if (phone) q.$or.push({ mobileKey: phone.mobileKeyRegex });
     }
 
+    // Exclude entries deleted by internal repair scripts — these are
+    // deduplication artefacts, not genuine user deletions, and clutter the report.
+    q.deletedByName = { $not: /^Repair script/ };
+
     const contacts = await DeletedContact.find(q).sort({ createdAt: -1 }).limit(1000).lean();
     res.json({ success: true, contacts });
 });
