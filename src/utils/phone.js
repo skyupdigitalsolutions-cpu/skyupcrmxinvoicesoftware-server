@@ -80,9 +80,11 @@ const escapeRx = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 //
 //   mobileKeyRegex   — for a normalised `mobileKey` field (digits only,
 //                       country code, no leading zero — see Lead.js /
-//                       normalizePhone). A plain "contains" match already
-//                       handles country-code-or-not and leading-zero-or-not,
-//                       since both variants are always substrings of the key.
+//                       normalizePhone). Only variants with >= 7 digits are
+//                       included so short stripped variants (e.g. stripping
+//                       a 2-digit country code from a 10-digit number gives
+//                       an 8-digit local number — fine) don't produce
+//                       false-positive matches on unrelated numbers.
 //   rawFieldRegexes  — for a free-text `mobile` field that may still contain
 //                       spaces/dashes/parens and may or may not include the
 //                       country code (Order.mobile / Invoice.mobile — these
@@ -117,8 +119,19 @@ export function phoneSearchCandidates(raw) {
         }
     }
 
-    const mobileKeyRegex = new RegExp([...variants].map(escapeRx).join('|'));
-    const rawFieldRegexes = [...variants].map(
+    // Only use variants with >= 9 digits for mobileKey regex — shorter
+    // variants (e.g. stripping a 2-digit code from a 10-digit number gives
+    // an 8-digit local number — that's fine at 9+, but a 7-digit result of
+    // stripping multiple codes would match too many unrelated numbers as a
+    // substring). 9 digits is the minimum meaningful local number length.
+    const longVariants = [...variants].filter((v) => v.length >= 9);
+    // Fall back to all variants if none are long enough — the < 3 digit guard
+    // above means this only happens for 3–8 digit inputs where the caller
+    // explicitly wants a best-effort partial match.
+    const regexVariants = longVariants.length > 0 ? longVariants : [...variants];
+
+    const mobileKeyRegex = new RegExp(regexVariants.map(escapeRx).join('|'));
+    const rawFieldRegexes = regexVariants.map(
         (v) => new RegExp(v.split('').map(escapeRx).join('\\D*'))
     );
 
