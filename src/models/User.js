@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
+import { encryptPassword } from '../utils/crypto.js';
 
 const userSchema = new mongoose.Schema({
     name: { type: String, required: true, trim: true, maxlength: 80 },
@@ -15,14 +16,12 @@ const userSchema = new mongoose.Schema({
     },
     password: { type: String, required: true, minlength: 6, select: false },
 
-    // Admin-visible copy of the most recently set password, kept in readable
-    // form so company admins can view/share employee credentials (Option B,
-    // chosen deliberately). Recorded whenever a password is set — create, admin
-    // reset, or self reset. Never returned by toSafeJSON(); only surfaced by the
-    // admin-only user-list endpoint. Empty for accounts whose password predates
-    // this feature, until the password is next set. NOTE: this stores real
-    // passwords in the DB; anyone with DB/admin access can read them.
-    visiblePassword: { type: String, default: '', select: false },
+    // AES-256-GCM encrypted copy of the most recently set password.
+    // Decrypted server-side and returned only on the admin-only user-list
+    // endpoint so admins can view/share employee credentials.
+    // Format: iv:authTag:ciphertext (all hex) — useless without the
+    // PASSWORD_ENCRYPTION_KEY env var. Never returned by toSafeJSON().
+    encryptedPassword: { type: String, default: '', select: false },
 
     // Contact email — used for password reset. Optional but required for
     // forgot-password to work. Not globally unique (multi-tenant: two companies
@@ -69,7 +68,16 @@ const userSchema = new mongoose.Schema({
 
 userSchema.pre('save', async function(next) {
     if (!this.isModified('password')) return next();
-    this.visiblePassword = this.password; // readable copy for admin view (before hashing)
+    // Encrypt the plaintext password BEFORE hashing so we still have it.
+    // encryptPassword() uses AES-256-GCM with a random IV — the result is
+    // safe to store in the DB (useless without the server's encryption key).
+    try {
+        this.encryptedPassword = encryptPassword(this.password);
+    } catch (err) {
+        // If the encryption key is missing, fail loudly rather than silently
+        // falling back to storing plaintext.
+        return next(err);
+    }
     this.password = await bcrypt.hash(this.password, 12);
     next();
 });

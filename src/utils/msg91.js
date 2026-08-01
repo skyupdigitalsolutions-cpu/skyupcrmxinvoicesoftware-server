@@ -54,18 +54,13 @@ function buildSessionPayload({ integratedNumber, to, text }) {
 // top-level recipient_number shape as the text session message, since both
 // go through the non-bulk single-message endpoint.
 function buildMediaPayload({ integratedNumber, to, mediaType, mediaUrl, caption, filename }) {
-    const mediaObj = { link: mediaUrl };
-    if (caption) mediaObj.caption = caption;
-    if (mediaType === 'document' && filename) mediaObj.filename = filename;
     return {
         integrated_number: integratedNumber,
         recipient_number: to,
         content_type: mediaType,
-        payload: {
-            messaging_product: 'whatsapp',
-            type: mediaType,
-            [mediaType]: mediaObj,
-        },
+        attachment_url: mediaUrl,
+        ...(caption ? { caption } : {}),
+        ...(mediaType === 'document' && filename ? { filename } : {}),
     };
 }
 
