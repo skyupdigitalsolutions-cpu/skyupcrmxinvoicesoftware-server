@@ -10,9 +10,43 @@ import mongoose from 'mongoose';
 // submissions, could compute a different key each time and produce
 // duplicate lead records instead of matching an existing one.
 const DIAL = {
+  // Gulf / Middle East
   UAE: '971', 'Saudi Arabia': '966', Kuwait: '965', Qatar: '974', Bahrain: '973',
   Oman: '968', Iran: '98', Iraq: '964', Syria: '963', Yemen: '967', Lebanon: '961',
-  Georgia: '995', India: '91', 'Sri Lanka': '94', 'United Kingdom': '44',
+  Jordan: '962', Palestine: '970', Israel: '972', Turkey: '90',
+  // Central Asia
+  Georgia: '995', Armenia: '374', Azerbaijan: '994', Kazakhstan: '7',
+  Uzbekistan: '998', Turkmenistan: '993', Tajikistan: '992', Kyrgyzstan: '996',
+  Afghanistan: '93', Pakistan: '92',
+  // South Asia
+  India: '91', 'Sri Lanka': '94', Bangladesh: '880', Nepal: '977',
+  Bhutan: '975', Maldives: '960',
+  // Southeast Asia
+  Indonesia: '62', Malaysia: '60', Philippines: '63', Thailand: '66',
+  Vietnam: '84', Singapore: '65', Myanmar: '95', Cambodia: '855',
+  Laos: '856', Brunei: '673',
+  // East Asia
+  China: '86', Japan: '81', 'South Korea': '82', Mongolia: '976',
+  Taiwan: '886', 'Hong Kong': '852', Macau: '853',
+  // Europe
+  'United Kingdom': '44', Germany: '49', France: '33', Italy: '39',
+  Spain: '34', Portugal: '351', Netherlands: '31', Belgium: '32',
+  Switzerland: '41', Austria: '43', Sweden: '46', Norway: '47',
+  Denmark: '45', Finland: '358', Ireland: '353', Greece: '30',
+  Poland: '48', 'Czech Republic': '420', Slovakia: '421', Hungary: '36',
+  Romania: '40', Bulgaria: '359', Croatia: '385', Serbia: '381',
+  Slovenia: '386', Albania: '355', Ukraine: '380', Belarus: '375',
+  Moldova: '373', Russia: '7', Estonia: '372', Latvia: '371',
+  Lithuania: '370', Luxembourg: '352', Iceland: '354', Malta: '356',
+  Cyprus: '357',
+  // Americas
+  USA: '1', Canada: '1', Mexico: '52', Brazil: '55', Argentina: '54',
+  Colombia: '57', Chile: '56', Peru: '51', Venezuela: '58', Ecuador: '593',
+  Bolivia: '591', Paraguay: '595', Uruguay: '598', Guyana: '592',
+  Suriname: '597', Panama: '507', 'Costa Rica': '506', Guatemala: '502',
+  Honduras: '504', 'El Salvador': '503', Nicaragua: '505', Cuba: '53',
+  Haiti: '509',
+  // Africa
   Egypt: '20', Sudan: '249', 'South Sudan': '211', Libya: '218', Algeria: '213',
   Morocco: '212', Tunisia: '216', Angola: '244', Benin: '229', Botswana: '267',
   'Burkina Faso': '226', Burundi: '257', Cameroon: '237', 'Cape Verde': '238',
@@ -22,10 +56,14 @@ const DIAL = {
   Gabon: '241', Gambia: '220', Ghana: '233', Guinea: '224', 'Guinea-Bissau': '245',
   'Ivory Coast': '225', Kenya: '254', Lesotho: '266', Liberia: '231',
   Madagascar: '261', Malawi: '265', Mali: '223', Mauritania: '222', Mauritius: '230',
-  Mozambique: '258', Namibia: '264', Niger: '227', Nigeria: '234', Rwanda: '250',
-  'Sao Tome and Principe': '239', Senegal: '221', Seychelles: '248',
+  Mayotte: '262', Mozambique: '258', Namibia: '264', Niger: '227', Nigeria: '234',
+  Rwanda: '250', 'Sao Tome and Principe': '239', Senegal: '221', Seychelles: '248',
   'Sierra Leone': '232', Somalia: '252', 'South Africa': '27', Tanzania: '255',
-  Togo: '228', Uganda: '256', Zambia: '260', Zimbabwe: '263', Other: '',
+  Togo: '228', Uganda: '256', Zambia: '260', Zimbabwe: '263',
+  // Oceania
+  Australia: '61', 'New Zealand': '64', Fiji: '679', 'Papua New Guinea': '675',
+  // Fallback — user types country name + code manually via CountrySelect
+  Other: '',
 };
 
 // Case-insensitive lookup: 'iran', 'IRAN', 'Iran' all resolve correctly.
@@ -45,7 +83,17 @@ export function normalizePhone(raw, country = 'UAE') {
   let p = String(raw).replace(/[^\d]/g, '');
   if (!p) return '';
   if (p.startsWith('0')) p = p.slice(1);           // strip leading zero
-  const code = dialCode(country);
+
+  // Support custom country format "CountryName|dialCode" (e.g. "Mayotte|262")
+  // saved by CountrySelect when user types a country not in the built-in list.
+  let code;
+  if (country && country.includes('|')) {
+    const parts = country.split('|');
+    code = parts[1] ? parts[1].replace(/\D/g, '') : '';
+  } else {
+    code = dialCode(country);
+  }
+
   if (code && !p.startsWith(code)) p = code + p;  // prepend country code
   return p;
 }
