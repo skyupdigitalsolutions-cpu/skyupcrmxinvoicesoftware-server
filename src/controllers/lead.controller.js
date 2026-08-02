@@ -346,6 +346,12 @@ export const setLeadStatus = asyncHandler(async(req, res) => {
     const prevStatus = lead.status;
     lead.status = req.body.status;
 
+    // Clear the monthly-reset flag as soon as a salesperson manually
+    // changes the status — the green "auto-reset" highlight is no longer needed.
+    if (prevStatus !== lead.status && lead.monthlyReset) {
+        lead.monthlyReset = false;
+    }
+
     if (prevStatus !== lead.status) {
         lead.editHistory.push({
             by: req.user._id,

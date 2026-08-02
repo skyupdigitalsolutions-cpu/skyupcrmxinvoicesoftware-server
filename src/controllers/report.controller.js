@@ -604,10 +604,50 @@ export const dailyReport = asyncHandler(async(req, res) => {
         orders,
         invoices,
         deliveries,
+        deliveryByStage: pendingDeliveries.reduce((acc, pd) => {
+            acc[pd.stage] = (acc[pd.stage] || 0) + 1;
+            return acc;
+        }, {}),
         pendingDeliveries,
         followUps,
         conversions: dayLeads
             .filter((l) => isBuyer(l))
             .map((l) => ({ _id: l._id, name: l.name, campaign: l.campaign, assignedUserName: l.ownerName, source: l.source })),
     });
+});
+
+// ── Monthly comparison: last 6 months of Buyer + Opportunity counts ──────────
+export const monthlyComparison = asyncHandler(async (req, res) => {
+    const scope = tenantScope(req);
+    const now = new Date();
+
+    const months = [];
+    for (let i = 5; i >= 0; i--) {
+        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        months.push({
+            key: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`,
+            label: d.toLocaleDateString('en-US', { month: 'short', year: '2-digit' }),
+            start: new Date(d.getFullYear(), d.getMonth(), 1),
+            end: new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59, 999),
+        });
+    }
+
+    const leads = await Lead.find({
+        ...scope,
+        createdAt: { $gte: months[0].start, $lte: months[months.length - 1].end },
+    }).select('status converted createdAt').lean();
+
+    const result = months.map(({ key, label, start, end }) => {
+        const monthLeads = leads.filter(l => {
+            const t = new Date(l.createdAt).getTime();
+            return t >= start.getTime() && t <= end.getTime();
+        });
+        const buyers      = monthLeads.filter(l => l.status === 'Won' || l.converted).length;
+        const opportunity = monthLeads.filter(l => l.status === 'Interested' || l.status === 'Contacted').length;
+        const enquiry     = monthLeads.filter(l => l.status === 'Follow-up').length;
+        const newLeads    = monthLeads.filter(l => l.status === 'New').length;
+        return { key, label, buyers, opportunity, enquiry, newLeads, total: monthLeads.length };
+    });
+
+    res.json({ success: true, months: result });
 });

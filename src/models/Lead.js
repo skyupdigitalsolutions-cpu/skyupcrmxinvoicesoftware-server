@@ -180,6 +180,12 @@ const leadSchema = new mongoose.Schema(
     // owner reschedules, followUpAt changes and a new reminder becomes eligible.
     followUpRemindedFor: { type: Date, default: null },
     converted:{ type: Boolean, default: false },
+    // Set to true by the monthly stage reset scheduler when a Won lead is
+    // automatically moved back to Interested (Buyer → Opportunity). Cleared
+    // as soon as the salesperson manually changes the status. Used by the
+    // client to render the stage badge green so auto-reset leads are
+    // instantly identifiable from normal Opportunity leads.
+    monthlyReset: { type: Boolean, default: false },
     orderNo:  { type: Number, default: null },
     owner:    { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     ownerName:{ type: String, default: '' },
