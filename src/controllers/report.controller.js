@@ -196,8 +196,19 @@ export const dashboard = asyncHandler(async(req, res) => {
         .sort((a, b) => b.leads - a.leads)
         .slice(0, 6);
 
+    // Delivery stage breakdown from orders for dashboard KPI pills.
+    const deliveryByStage = {};
+    orders.forEach((o) => {
+        const stage = o.deliveryStatus || o.status;
+        const validStages = ['Pending', 'Confirmed', 'Packed', 'Market Delay', 'Out for Delivery'];
+        if (validStages.includes(stage)) {
+            deliveryByStage[stage] = (deliveryByStage[stage] || 0) + 1;
+        }
+    });
+
     res.json({
         success: true,
+        deliveryByStage,
         stats: {
             totalOrders: orders.length,
             pending: byStatus['Pending'] || 0,

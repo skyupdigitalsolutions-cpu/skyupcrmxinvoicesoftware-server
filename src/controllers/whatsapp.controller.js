@@ -437,6 +437,18 @@ export const webhook = asyncHandler(async (req, res) => {
         const requestId   = entry.message_uuid || entry.requestId || entry.request_id || entry.msg_id || entry.message_id || '';
         const statusValue = entry.reason || entry.status || '';
 
+        // direction: 0 = inbound (customer → us), 1 = outbound (us → customer).
+        // Skip outbound echoes — we already save those when sending.
+        // Also skip MSG91 keyword 'Callback' entries — these are auto-reply
+        // triggers fired by MSG91 when a keyword is matched (e.g. "Hello",
+        // "Callback"). They duplicate the actual inbound message and have no
+        // real content to save.
+        const directionVal = entry.direction;
+        const isOutbound = directionVal === 1 || directionVal === '1' || directionVal === 'OUTBOUND';
+        const isCallback = (entry.inbound_setting || entry.inbound_type || '') === 'Callback'
+                        || String(entry.inbound_setting || '').toLowerCase() === 'callback';
+        if (isOutbound || isCallback) continue;
+
         // Text: new format has top-level `text` string; old format had entry.text.body or entry.body
         const text = (typeof entry.text === 'string' ? entry.text : (entry.text && entry.text.body))
                     || (entry.messages && entry.messages[0] && entry.messages[0].text && entry.messages[0].text.body)
@@ -458,8 +470,11 @@ export const webhook = asyncHandler(async (req, res) => {
             ? await Company.findOne({ 'msg91.integratedNumber': toNumber })
             : null;
 
-        // Delivery/read status update
-        if (statusValue && requestId) {
+        // Delivery/read status update — only when there's a status value
+        // AND the entry has a requestId but no sender (pure status callback).
+        // Guard: if `from` is set alongside statusValue, it's an inbound
+        // message with a status field — treat it as a message, not a status update.
+        if (statusValue && requestId && !from) {
             const mapped = statusValue === 'delivered' ? 'delivered'
                 : statusValue === 'read' ? 'read'
                 : statusValue === 'failed' ? 'failed'
