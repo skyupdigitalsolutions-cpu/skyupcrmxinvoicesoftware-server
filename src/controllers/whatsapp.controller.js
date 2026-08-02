@@ -55,7 +55,7 @@ export const setSettings = asyncHandler(async (req, res) => {
     if (!company.msg91) company.msg91 = {};
     if (enabled !== undefined) company.msg91.enabled = !!enabled;
     if (authKey !== undefined && String(authKey).trim()) company.msg91.authKey = String(authKey).trim();
-    if (integratedNumber !== undefined) company.msg91.integratedNumber = String(integratedNumber).trim();
+    if (integratedNumber !== undefined) company.msg91.integratedNumber = String(integratedNumber).trim().replace(/^\+/, ''); // strip leading + for consistent lookup
     if (senderName !== undefined) company.msg91.senderName = String(senderName).trim();
     // msg91 is a nested plain-object path, not a real Mongoose sub-schema —
     // explicitly mark it modified so a direct property assignment like the
@@ -467,7 +467,10 @@ export const webhook = asyncHandler(async (req, res) => {
         if (!from && !requestId) continue;
 
         const company = toNumber
-            ? await Company.findOne({ 'msg91.integratedNumber': toNumber })
+            ? await Company.findOne({
+                // Strip leading + so '+971561778944' matches '971561778944' and vice versa
+                'msg91.integratedNumber': { $in: [toNumber, '+' + toNumber, toNumber.replace(/^\+/, '')] }
+              })
             : null;
 
         // Delivery/read status update — only when there's a status value
