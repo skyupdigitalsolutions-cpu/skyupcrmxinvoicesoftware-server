@@ -282,7 +282,7 @@ export const updateLead = asyncHandler(async(req, res) => {
         throw new ApiError(403, 'Only the lead owner or an admin can edit core details');
     }
 
-    const fields = ['name', 'altMobile', 'altCountry', 'city', 'email', 'source', 'campaign', 'interest', 'remark', 'delivery', 'status', 'followUpAt'];
+    const fields = ['name', 'country', 'altMobile', 'altCountry', 'city', 'email', 'source', 'campaign', 'interest', 'remark', 'delivery', 'status', 'followUpAt'];
 
     // Capture the diff BEFORE applying changes, so the history/notification
     // reflect exactly what this save actually changed.
@@ -290,11 +290,15 @@ export const updateLead = asyncHandler(async(req, res) => {
 
     fields.forEach((f) => { if (req.body[f] !== undefined) lead[f] = req.body[f]; });
 
-    // Admin can update mobile number — check for duplicates first.
-    if (req.user.role === 'admin' && req.body.mobile !== undefined && req.body.mobile !== lead.mobile) {
-        const newMobile = String(req.body.mobile).trim();
-        const country = req.body.country || lead.country;
-        const newKey = normalizePhone(newMobile, country);
+    // Admin can update mobile number and/or country.
+    // Recalculate mobileKey whenever either mobile or country changes.
+    const mobileChanged = req.user.role === 'admin' && req.body.mobile !== undefined && String(req.body.mobile).trim() !== lead.mobile;
+    const countryChanged = req.body.country !== undefined && req.body.country !== lead.country;
+
+    if (req.user.role === 'admin' && (mobileChanged || countryChanged)) {
+        const newMobile = mobileChanged ? String(req.body.mobile).trim() : lead.mobile;
+        const newCountry = lead.country; // already updated above by fields.forEach
+        const newKey = normalizePhone(newMobile, newCountry);
         if (newKey) {
             // Check no other lead in this company has the same mobileKey.
             const duplicate = await Lead.findOne({
@@ -305,10 +309,12 @@ export const updateLead = asyncHandler(async(req, res) => {
             if (duplicate) {
                 throw new ApiError(409, `This mobile number is already assigned to lead "${duplicate.name}".`);
             }
+            lead.mobileKey = newKey;
         }
-        changes.push({ field: 'mobile', from: lead.mobile, to: newMobile });
-        lead.mobile = newMobile;
-        if (newKey) lead.mobileKey = newKey;
+        if (mobileChanged) {
+            changes.push({ field: 'mobile', from: lead.mobile, to: newMobile });
+            lead.mobile = newMobile;
+        }
     }
 
     // Admin can re-assign owner
