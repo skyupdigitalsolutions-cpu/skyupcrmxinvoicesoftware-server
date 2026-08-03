@@ -290,6 +290,27 @@ export const updateLead = asyncHandler(async(req, res) => {
 
     fields.forEach((f) => { if (req.body[f] !== undefined) lead[f] = req.body[f]; });
 
+    // Admin can update mobile number — check for duplicates first.
+    if (req.user.role === 'admin' && req.body.mobile !== undefined && req.body.mobile !== lead.mobile) {
+        const newMobile = String(req.body.mobile).trim();
+        const country = req.body.country || lead.country;
+        const newKey = normalizePhone(newMobile, country);
+        if (newKey) {
+            // Check no other lead in this company has the same mobileKey.
+            const duplicate = await Lead.findOne({
+                mobileKey: newKey,
+                company: lead.company,
+                _id: { $ne: lead._id },
+            });
+            if (duplicate) {
+                throw new ApiError(409, `This mobile number is already assigned to lead "${duplicate.name}".`);
+            }
+        }
+        changes.push({ field: 'mobile', from: lead.mobile, to: newMobile });
+        lead.mobile = newMobile;
+        if (newKey) lead.mobileKey = newKey;
+    }
+
     // Admin can re-assign owner
     if (req.user.role === 'admin' && req.body.owner) {
         const { User } = await
@@ -345,12 +366,6 @@ export const setLeadStatus = asyncHandler(async(req, res) => {
 
     const prevStatus = lead.status;
     lead.status = req.body.status;
-
-    // Clear the monthly-reset flag as soon as a salesperson manually
-    // changes the status — the green "auto-reset" highlight is no longer needed.
-    if (prevStatus !== lead.status && lead.monthlyReset) {
-        lead.monthlyReset = false;
-    }
 
     if (prevStatus !== lead.status) {
         lead.editHistory.push({
