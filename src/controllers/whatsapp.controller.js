@@ -512,12 +512,16 @@ export const webhook = asyncHandler(async (req, res) => {
                 const lastOut = await WhatsAppMessage.findOne({ lead: lead._id, direction: 'out' }).sort({ createdAt: -1 });
                 if (lastOut) { lastOut.status = 'replied'; await lastOut.save(); }
 
-                if (lead.status === 'New') {
-                    lead.status = 'Contacted';
+                // Auto-promote lead stage when they reply on WhatsApp:
+                // New → Contacted (Lead stage)
+                // Contacted → Interested (Opportunity stage)
+                if (lead.status === 'New' || lead.status === 'Contacted') {
+                    const prevStatus = lead.status;
+                    lead.status = lead.status === 'New' ? 'Contacted' : 'Interested';
                     lead.editHistory.push({
-                        by: lead.owner,
+                        by: null,
                         byName: 'WhatsApp (auto)',
-                        changes: [{ field: 'status', from: 'New', to: 'Contacted — lead replied on WhatsApp' }],
+                        changes: [{ field: 'status', from: prevStatus, to: `${lead.status} — lead replied on WhatsApp` }],
                     });
                     await lead.save();
                 }
