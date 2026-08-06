@@ -15,6 +15,7 @@ import {
     relinkContact,
     webhook,
     getTemplateSentStatus,
+    getSessionWindow,
 } from '../controllers/whatsapp.controller.js';
 import { protect } from '../middleware/auth.js';
 
@@ -43,6 +44,7 @@ router.get('/conversations', listConversations);
 router.get('/template-status', getTemplateSentStatus);
 router.get('/thread/:leadId', getThread);
 router.get('/thread-by-number/:contactNumber', getThreadByNumber);
+router.get('/session-window/:leadId', getSessionWindow);
 router.post('/relink-contact', relinkContact);
 
 export default router;

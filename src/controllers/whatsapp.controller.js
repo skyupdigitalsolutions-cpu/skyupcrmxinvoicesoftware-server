@@ -346,6 +346,10 @@ export const listConversations = asyncHandler(async (req, res) => {
                     lastResponse: lastIn ? lastIn.text : '',
                     lastResponseAt: lastIn ? lastIn.createdAt : null,
                     unread: hasUnseen,
+                    // 24-hour session window — computed from last inbound message
+                    sessionOpen: lastIn ? (Date.now() - new Date(lastIn.createdAt).getTime()) < 86400000 : false,
+                    sessionExpiresAt: lastIn ? new Date(new Date(lastIn.createdAt).getTime() + 86400000).toISOString() : null,
+                    lastInboundAt: lastIn ? lastIn.createdAt : null,
                 };
             }
 
@@ -359,6 +363,9 @@ export const listConversations = asyncHandler(async (req, res) => {
                 lastResponse: lastIn ? lastIn.text : '',
                 lastResponseAt: lastIn ? lastIn.createdAt : null,
                 unread: hasUnseen,
+                sessionOpen: lastIn ? (Date.now() - new Date(lastIn.createdAt).getTime()) < 86400000 : false,
+                sessionExpiresAt: lastIn ? new Date(new Date(lastIn.createdAt).getTime() + 86400000).toISOString() : null,
+                lastInboundAt: lastIn ? lastIn.createdAt : null,
             };
         })
         .filter(Boolean)
@@ -606,4 +613,54 @@ export const webhook = asyncHandler(async (req, res) => {
     }
 
     res.json({ success: true });
+});
+
+// ── Session window check ──────────────────────────────────────────────────────
+// WhatsApp allows free-form session replies only within 24 hours of the last
+// INBOUND message from a lead. After that, only approved templates can be sent.
+// This endpoint computes whether the window is still open and how much time
+// remains, so the UI can show a live countdown and disable the reply input when
+// the window has expired.
+//
+// GET /whatsapp/session-window/:leadId
+// Response: { open: bool, expiresAt: ISO|null, lastInboundAt: ISO|null, hoursLeft: number }
+export const getSessionWindow = asyncHandler(async (req, res) => {
+    const companyId = tenantCompanyId(req);
+    const { leadId } = req.params;
+
+    const lead = await Lead.findOne({ _id: leadId, ...tenantScope(req) });
+    if (!lead) throw new ApiError(404, 'Lead not found');
+
+    // Find the most recent inbound message from this lead
+    const lastInbound = await WhatsAppMessage.findOne({
+        company: companyId,
+        lead: lead._id,
+        direction: 'in',
+    }).sort({ createdAt: -1 }).lean();
+
+    if (!lastInbound) {
+        // No inbound message yet — window is not open (need to send a template first)
+        return res.json({
+            success: true,
+            open: false,
+            expiresAt: null,
+            lastInboundAt: null,
+            hoursLeft: 0,
+        });
+    }
+
+    const WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours in ms
+    const lastInboundAt = new Date(lastInbound.createdAt);
+    const expiresAt = new Date(lastInboundAt.getTime() + WINDOW_MS);
+    const now = Date.now();
+    const msLeft = expiresAt.getTime() - now;
+    const open = msLeft > 0;
+
+    res.json({
+        success: true,
+        open,
+        expiresAt: expiresAt.toISOString(),
+        lastInboundAt: lastInboundAt.toISOString(),
+        hoursLeft: open ? Math.max(0, msLeft / 3600000) : 0,
+    });
 });
