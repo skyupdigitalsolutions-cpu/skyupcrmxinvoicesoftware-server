@@ -380,16 +380,24 @@ export const listConversations = asyncHandler(async (req, res) => {
 });
 
 // Full thread for one lead (used by the "Continue Chat" drawer).
-// GET /whatsapp/template-status?leadIds=id1,id2&templateName=xyz
+// POST /whatsapp/template-status
+// Body: { leadIds: string[], templateName: string }
 // Returns per-lead status of whether a specific template was already sent,
 // when it was sent, and whether it succeeded or failed. Used by the bulk
 // send UI to warn agents before resending the same template to a lead.
+// NOTE: This is a POST (not GET) because leadIds can be 1000+ entries —
+// a GET query string would exceed the ~8KB URL limit and get 414 errors.
 export const getTemplateSentStatus = asyncHandler(async (req, res) => {
-    const { leadIds, templateName } = req.query;
+    // Accept both body (POST) and query (legacy GET) for backwards compat
+    const templateName = req.body?.templateName || req.query?.templateName;
+    const rawIds       = req.body?.leadIds || req.query?.leadIds;
     if (!templateName) throw new ApiError(400, 'templateName is required.');
 
     const companyId = tenantCompanyId(req);
-    const ids = String(leadIds || '').split(',').map(s => s.trim()).filter(Boolean);
+    // body sends an array; query sends a comma-separated string
+    const ids = Array.isArray(rawIds)
+        ? rawIds.map(s => String(s).trim()).filter(Boolean)
+        : String(rawIds || '').split(',').map(s => s.trim()).filter(Boolean);
     if (!ids.length) return res.json({ success: true, statuses: {} });
 
     // Find the most recent template send per lead for this template name

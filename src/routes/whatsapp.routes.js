@@ -41,7 +41,7 @@ router.post('/reply', sendReply);
 router.post('/send-media', sendMedia);
 
 router.get('/conversations', listConversations);
-router.get('/template-status', getTemplateSentStatus);
+router.post('/template-status', getTemplateSentStatus);  // POST — leadIds array can be 1000+ entries, too large for a GET query string
 router.get('/thread/:leadId', getThread);
 router.get('/thread-by-number/:contactNumber', getThreadByNumber);
 router.get('/session-window/:leadId', getSessionWindow);
