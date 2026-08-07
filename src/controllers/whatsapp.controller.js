@@ -319,7 +319,7 @@ export const listConversations = asyncHandler(async (req, res) => {
     }
 
     const leadIds = [...byKey.values()].filter((v) => v.leadId).map((v) => String(v.leadId));
-    const leads = await Lead.find({ _id: { $in: leadIds } }).select('name mobile country stage status owner').lean();
+    const leads = await Lead.find({ _id: { $in: leadIds } }).select('name mobile country stage status owner ownerName').lean();
     const leadById = new Map(leads.map((l) => [String(l._id), l]));
 
     // Employees only see LEAD conversations they themselves added/own — same
@@ -340,16 +340,14 @@ export const listConversations = asyncHandler(async (req, res) => {
                 return {
                     key, leadId: String(leadId), isLead: true, contactNumber: '',
                     leadName: lead.name, mobile: lead.mobile,
+                    ownerName: lead.ownerName || '',
+                    ownerId: lead.owner ? String(lead.owner) : '',
                     lastTemplate: lastOut ? lastOut.templateName || '' : '',
                     lastStatus: lastOut ? lastOut.status : '',
                     lastSentAt: lastOut ? lastOut.createdAt : null,
                     lastResponse: lastIn ? lastIn.text : '',
                     lastResponseAt: lastIn ? lastIn.createdAt : null,
                     unread: hasUnseen,
-                    // 24-hour session window — computed from last inbound message
-                    sessionOpen: lastIn ? (Date.now() - new Date(lastIn.createdAt).getTime()) < 86400000 : false,
-                    sessionExpiresAt: lastIn ? new Date(new Date(lastIn.createdAt).getTime() + 86400000).toISOString() : null,
-                    lastInboundAt: lastIn ? lastIn.createdAt : null,
                 };
             }
 
@@ -363,9 +361,6 @@ export const listConversations = asyncHandler(async (req, res) => {
                 lastResponse: lastIn ? lastIn.text : '',
                 lastResponseAt: lastIn ? lastIn.createdAt : null,
                 unread: hasUnseen,
-                sessionOpen: lastIn ? (Date.now() - new Date(lastIn.createdAt).getTime()) < 86400000 : false,
-                sessionExpiresAt: lastIn ? new Date(new Date(lastIn.createdAt).getTime() + 86400000).toISOString() : null,
-                lastInboundAt: lastIn ? lastIn.createdAt : null,
             };
         })
         .filter(Boolean)
@@ -380,33 +375,30 @@ export const listConversations = asyncHandler(async (req, res) => {
 });
 
 // Full thread for one lead (used by the "Continue Chat" drawer).
-// POST /whatsapp/template-status
-// Body: { leadIds: string[], templateName: string }
+// GET /whatsapp/template-status?leadIds=id1,id2&templateName=xyz
 // Returns per-lead status of whether a specific template was already sent,
 // when it was sent, and whether it succeeded or failed. Used by the bulk
 // send UI to warn agents before resending the same template to a lead.
-// NOTE: This is a POST (not GET) because leadIds can be 1000+ entries —
-// a GET query string would exceed the ~8KB URL limit and get 414 errors.
 export const getTemplateSentStatus = asyncHandler(async (req, res) => {
-    // Accept both body (POST) and query (legacy GET) for backwards compat
-    const templateName = req.body?.templateName || req.query?.templateName;
-    const rawIds       = req.body?.leadIds || req.query?.leadIds;
+    const { leadIds, templateName } = req.query;
     if (!templateName) throw new ApiError(400, 'templateName is required.');
 
     const companyId = tenantCompanyId(req);
-    // body sends an array; query sends a comma-separated string
-    const ids = Array.isArray(rawIds)
-        ? rawIds.map(s => String(s).trim()).filter(Boolean)
-        : String(rawIds || '').split(',').map(s => s.trim()).filter(Boolean);
+    const ids = String(leadIds || '').split(',').map(s => s.trim()).filter(Boolean);
     if (!ids.length) return res.json({ success: true, statuses: {} });
 
-    // Find the most recent template send per lead for this template name
-    const messages = await WhatsAppMessage.find({
+    // '__any__' is a special value meaning: find leads that received ANY template.
+    // Used by the frontend excludeSent toggle when no specific template is selected.
+    const query = {
         company: companyId,
         lead: { $in: ids },
         kind: 'template',
-        templateName,
-    }).sort({ createdAt: -1 }).lean();
+        direction: 'out',
+    };
+    if (templateName !== '__any__') query.templateName = templateName;
+
+    // Find the most recent template send per lead
+    const messages = await WhatsAppMessage.find(query).sort({ createdAt: -1 }).lean();
 
     // Group by leadId — keep only the most recent send per lead
     const statuses = {};
@@ -621,54 +613,4 @@ export const webhook = asyncHandler(async (req, res) => {
     }
 
     res.json({ success: true });
-});
-
-// ── Session window check ──────────────────────────────────────────────────────
-// WhatsApp allows free-form session replies only within 24 hours of the last
-// INBOUND message from a lead. After that, only approved templates can be sent.
-// This endpoint computes whether the window is still open and how much time
-// remains, so the UI can show a live countdown and disable the reply input when
-// the window has expired.
-//
-// GET /whatsapp/session-window/:leadId
-// Response: { open: bool, expiresAt: ISO|null, lastInboundAt: ISO|null, hoursLeft: number }
-export const getSessionWindow = asyncHandler(async (req, res) => {
-    const companyId = tenantCompanyId(req);
-    const { leadId } = req.params;
-
-    const lead = await Lead.findOne({ _id: leadId, ...tenantScope(req) });
-    if (!lead) throw new ApiError(404, 'Lead not found');
-
-    // Find the most recent inbound message from this lead
-    const lastInbound = await WhatsAppMessage.findOne({
-        company: companyId,
-        lead: lead._id,
-        direction: 'in',
-    }).sort({ createdAt: -1 }).lean();
-
-    if (!lastInbound) {
-        // No inbound message yet — window is not open (need to send a template first)
-        return res.json({
-            success: true,
-            open: false,
-            expiresAt: null,
-            lastInboundAt: null,
-            hoursLeft: 0,
-        });
-    }
-
-    const WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours in ms
-    const lastInboundAt = new Date(lastInbound.createdAt);
-    const expiresAt = new Date(lastInboundAt.getTime() + WINDOW_MS);
-    const now = Date.now();
-    const msLeft = expiresAt.getTime() - now;
-    const open = msLeft > 0;
-
-    res.json({
-        success: true,
-        open,
-        expiresAt: expiresAt.toISOString(),
-        lastInboundAt: lastInboundAt.toISOString(),
-        hoursLeft: open ? Math.max(0, msLeft / 3600000) : 0,
-    });
 });
