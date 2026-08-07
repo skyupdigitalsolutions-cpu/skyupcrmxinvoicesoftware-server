@@ -15,7 +15,7 @@ import {
     relinkContact,
     webhook,
     getTemplateSentStatus,
-    getSessionWindow,
+    getSessionWindowStatus,
 } from '../controllers/whatsapp.controller.js';
 import { protect } from '../middleware/auth.js';
 
@@ -41,10 +41,10 @@ router.post('/reply', sendReply);
 router.post('/send-media', sendMedia);
 
 router.get('/conversations', listConversations);
-router.post('/template-status', getTemplateSentStatus);  // POST — leadIds array can be 1000+ entries, too large for a GET query string
+router.get('/session-window/:leadId', getSessionWindowStatus);
+router.get('/template-status', getTemplateSentStatus);
 router.get('/thread/:leadId', getThread);
 router.get('/thread-by-number/:contactNumber', getThreadByNumber);
-router.get('/session-window/:leadId', getSessionWindow);
 router.post('/relink-contact', relinkContact);
 
 export default router;

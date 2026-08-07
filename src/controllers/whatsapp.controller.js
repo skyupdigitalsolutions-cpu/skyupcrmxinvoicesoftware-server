@@ -379,6 +379,28 @@ export const listConversations = asyncHandler(async (req, res) => {
 // Returns per-lead status of whether a specific template was already sent,
 // when it was sent, and whether it succeeded or failed. Used by the bulk
 // send UI to warn agents before resending the same template to a lead.
+// ── Session window helper + endpoint ─────────────────────────────────────────
+async function getSessionWindow(leadId, companyId) {
+    const lastInbound = await WhatsAppMessage.findOne({
+        lead: leadId, company: companyId, direction: 'in',
+    }).sort({ createdAt: -1 }).lean();
+    if (!lastInbound) return { open: false, expiresAt: null, lastInboundAt: null };
+    const lastInboundAt = new Date(lastInbound.createdAt);
+    const expiresAt = new Date(lastInboundAt.getTime() + 24 * 60 * 60 * 1000);
+    const open = Date.now() < expiresAt.getTime();
+    return { open, expiresAt, lastInboundAt };
+}
+
+// GET /whatsapp/session-window/:leadId
+export const getSessionWindowStatus = asyncHandler(async (req, res) => {
+    const { leadId } = req.params;
+    const companyId = tenantCompanyId(req);
+    const lead = await Lead.findOne({ _id: leadId, ...tenantScope(req) });
+    if (!lead) throw new ApiError(404, 'Lead not found');
+    const session = await getSessionWindow(leadId, companyId);
+    res.json({ success: true, ...session });
+});
+
 export const getTemplateSentStatus = asyncHandler(async (req, res) => {
     const { leadIds, templateName } = req.query;
     if (!templateName) throw new ApiError(400, 'templateName is required.');
