@@ -55,7 +55,15 @@ export const setSettings = asyncHandler(async (req, res) => {
     if (!company.msg91) company.msg91 = {};
     if (enabled !== undefined) company.msg91.enabled = !!enabled;
     if (authKey !== undefined && String(authKey).trim()) company.msg91.authKey = String(authKey).trim();
-    if (integratedNumber !== undefined) company.msg91.integratedNumber = String(integratedNumber).trim();
+    // Stored as digits-only (no '+', spaces, or leading zeros) so it matches
+    // exactly what MSG91's inbound webhook sends for `integrated_number` —
+    // whatever format an admin types it in as (+971..., 00971..., spaces,
+    // dashes) is normalized here rather than trusted verbatim.
+    if (integratedNumber !== undefined) {
+        let digits = String(integratedNumber).replace(/\D/g, '');
+        if (digits.startsWith('00')) digits = digits.slice(2);
+        company.msg91.integratedNumber = digits;
+    }
     if (senderName !== undefined) company.msg91.senderName = String(senderName).trim();
     // msg91 is a nested plain-object path, not a real Mongoose sub-schema —
     // explicitly mark it modified so a direct property assignment like the
@@ -597,12 +605,28 @@ export const webhook = asyncHandler(async (req, res) => {
         // Never fall back to a global/ambiguous guess: a reply that can't be
         // tied to a company must never be matched against another tenant's
         // leads. Safely acknowledge (so MSG91 stops retrying) and log why.
-        const company = toNumber
-            ? await Company.findOne({ 'msg91.integratedNumber': toNumber })
-            : null;
+        //
+        // Matched on DIGITS ONLY rather than exact string equality. MSG91
+        // always sends `integrated_number` as plain digits, but the number
+        // saved on Company.msg91.integratedNumber may have been typed with a
+        // '+', a leading '00', or spaces/dashes — an exact-string match
+        // would silently fail to find a real, correctly-configured company.
+        let company = null;
+        const toDigitsRaw = String(toNumber).replace(/\D/g, '');
+        const toDigits = toDigitsRaw.startsWith('00') ? toDigitsRaw.slice(2) : toDigitsRaw;
+        if (toDigits) {
+            const candidates = await Company.find({
+                'msg91.integratedNumber': { $exists: true, $ne: '' },
+            }).select('_id msg91.integratedNumber');
+            company = candidates.find((c) => {
+                let d = String(c.msg91?.integratedNumber || '').replace(/\D/g, '');
+                if (d.startsWith('00')) d = d.slice(2);
+                return d === toDigits;
+            }) || null;
+        }
 
         console.log('[webhook] company identification', {
-            toNumber, companyId: company ? String(company._id) : null,
+            toNumber, toDigits, companyId: company ? String(company._id) : null,
         });
 
         if (!company) {
