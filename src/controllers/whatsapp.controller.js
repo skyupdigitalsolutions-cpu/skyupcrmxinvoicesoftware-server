@@ -583,12 +583,15 @@ export const relinkContact = asyncHandler(async (req, res) => {
 // a few common locations rather than assuming one fixed structure.
 export const webhook = asyncHandler(async (req, res) => {
     const secret = process.env.WHATSAPP_WEBHOOK_SECRET || '';
-    if (secret && req.query.token !== secret) {
+    // Fail CLOSED — if secret not set or token doesn't match, reject all calls.
+    if (!secret || req.query.token !== secret) {
         return res.json({ success: true, ignored: true });
     }
 
     const body = req.body || {};
-    console.log('[webhook] raw payload:', JSON.stringify(body, null, 2));
+    if (process.env.NODE_ENV !== 'production') {
+        console.log('[webhook] raw payload:', JSON.stringify(body, null, 2));
+    }
 
     const entries = Array.isArray(body.entry) ? body.entry : (Array.isArray(body) ? body : [body]);
 
