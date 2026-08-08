@@ -10,7 +10,7 @@
 
 import dotenv from 'dotenv';
 import mongoose from 'mongoose';
-import fetch from 'node-fetch';
+// fetch is built into Node 18+ — no import needed
 
 dotenv.config();
 
