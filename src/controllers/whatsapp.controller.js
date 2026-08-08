@@ -545,42 +545,115 @@ export const webhook = asyncHandler(async (req, res) => {
     }
 
     const entries = Array.isArray(body.entry) ? body.entry : (Array.isArray(body) ? body : [body]);
+    const ALLOWED_MEDIA_TYPES = ['image', 'document', 'video', 'audio'];
 
     for (const entry of entries) {
-        const from        = entry.customerNumber || entry.from || (entry.contact && entry.contact.wa_id) || '';
-        const toNumber    = entry.integratedNumber || entry.integrated_number || entry.to || '';
-        const requestId   = entry.requestId || entry.request_id || entry.msg_id || entry.message_id || '';
-        const statusValue = entry.reason || entry.status || (entry.type === 'status' ? entry.status : '');
-        const text        = (typeof entry.text === 'string' ? entry.text : (entry.text && entry.text.body)) || entry.body || entry.caption || '';
-        const contactName = entry.customerName || '';
-        const mediaUrl      = entry.url || '';
-        const mediaType     = entry.messageType || '';
-        const mediaFilename = entry.filename || '';
+        // MSG91's confirmed WhatsApp inbound payload nests the real data
+        // under `messages[0]` and `contacts[0]` (WhatsApp Cloud API-style
+        // shape), while status callbacks use flatter top-level fields.
+        // Check the nested structure first since it's the one that
+        // actually shows up for inbound replies; keep the flat fields as
+        // fallbacks for other payload variants (status callbacks, older
+        // MSG91 formats, etc). Never log `secret`/token values below.
+        const message = Array.isArray(entry.messages) ? entry.messages[0] : entry.message;
+        const contact = Array.isArray(entry.contacts) ? entry.contacts[0] : entry.contact;
 
-        if (!from && !requestId) continue;
+        const from        = entry.sender || entry.customerNumber || entry.from || message?.from || contact?.wa_id || '';
+        const toNumber     = entry.integrated_number || entry.integratedNumber || entry.to || '';
+        const requestId    = entry.message_uuid || entry.messageUuid || message?.id || entry.requestId || entry.request_id || entry.msg_id || entry.message_id || '';
+        const statusValue  = entry.reason || entry.status || (entry.type === 'status' ? entry.status : '');
+        const text         = (typeof entry.text === 'string' ? entry.text : (entry.text && entry.text.body)) || message?.text?.body || entry.body || entry.caption || '';
+        const contactName  = entry.customer_name || entry.customerName || contact?.profile?.name || '';
 
+        // Media: MSG91's nested `messages[0].type` (e.g. "image") points to
+        // a same-named sub-object (`messages[0].image.link` etc.) in the
+        // WhatsApp Cloud API shape; some MSG91 accounts instead send a flat
+        // `url`/`messageType`/`filename` on the entry itself. Support both
+        // without assuming one fixed shape, same as the rest of this parser.
+        const inboundMsgType = message?.type && message.type !== 'text' ? message.type : '';
+        const rawMediaType   = entry.messageType || inboundMsgType || '';
+        const mediaType      = ALLOWED_MEDIA_TYPES.includes(rawMediaType) ? rawMediaType : '';
+        const mediaNode      = message && mediaType ? message[mediaType] : null;
+        const mediaUrl       = entry.url || mediaNode?.link || mediaNode?.url || '';
+        const mediaFilename  = entry.filename || mediaNode?.filename || '';
+
+        // A status/reason field alone does NOT mean this is a status
+        // callback — MSG91 can carry unrelated fields on inbound message
+        // payloads too. Only treat it as a status callback when there is
+        // no actual inbound message content (see rule 5 in the review).
+        const hasInboundContent = Boolean(message) || Boolean(text) || Boolean(mediaUrl);
+
+        if (!from && !requestId && !hasInboundContent) {
+            console.warn('[webhook] Skipping payload — no usable from/requestId/message content found');
+            continue;
+        }
+
+        console.log('[webhook] received', {
+            kind: hasInboundContent ? 'inbound' : (statusValue ? 'status' : 'unknown'),
+            from, toNumber, requestId,
+        });
+
+        // ── Company identification — strictly by integrated number ──────────
+        // Never fall back to a global/ambiguous guess: a reply that can't be
+        // tied to a company must never be matched against another tenant's
+        // leads. Safely acknowledge (so MSG91 stops retrying) and log why.
         const company = toNumber
             ? await Company.findOne({ 'msg91.integratedNumber': toNumber })
             : null;
 
-        if (statusValue && requestId) {
+        console.log('[webhook] company identification', {
+            toNumber, companyId: company ? String(company._id) : null,
+        });
+
+        if (!company) {
+            console.warn('[webhook] Unable to identify company for inbound MSG91 payload — dropping safely (no matching integratedNumber). toNumber:', toNumber || '(missing)');
+            continue;
+        }
+
+        // ── Status callback (delivery/read/failed) — outbound messages only ──
+        if (!hasInboundContent && statusValue && requestId) {
             const mapped = statusValue === 'delivered' ? 'delivered'
                 : statusValue === 'read' ? 'read'
                 : statusValue === 'failed' ? 'failed'
                 : null;
             if (mapped) {
-                await WhatsAppMessage.updateOne({ msg91RequestId: requestId }, { $set: { status: mapped } });
+                // Scoped to this company AND direction:'out' — a status
+                // callback must never touch an inbound message, even if an
+                // inbound msg91RequestId happens to collide.
+                const result = await WhatsAppMessage.updateOne(
+                    { company: company._id, msg91RequestId: requestId, direction: 'out' },
+                    { $set: { status: mapped } }
+                );
+                console.log('[webhook] status callback processed', { requestId, mapped, matched: result.matchedCount });
+            } else {
+                console.log('[webhook] status callback with unrecognized status value, ignoring', { statusValue, requestId });
             }
             continue;
         }
 
-        if (from && (text || mediaUrl)) {
-            const digits = String(from).replace(/\D/g, '');
-            const leadQuery = company ? { company: company._id } : {};
-            let lead = await Lead.findOne({ ...leadQuery, mobileKey: digits });
-            if (!lead && digits.length >= 9) {
-                lead = await Lead.findOne({ ...leadQuery, mobileKey: new RegExp(`${digits.slice(-9)}$`) });
+        // ── Inbound reply message ─────────────────────────────────────────
+        if (hasInboundContent && from && (text || mediaUrl)) {
+            // Duplicate webhook-retry protection: MSG91 may redeliver the
+            // same inbound message. Never create a second copy.
+            if (requestId) {
+                const existing = await WhatsAppMessage.findOne({
+                    company: company._id, direction: 'in', msg91RequestId: requestId,
+                });
+                if (existing) {
+                    console.log('[webhook] duplicate inbound message — already processed, skipping create', { requestId, companyId: String(company._id) });
+                    continue;
+                }
             }
+
+            const digits = String(from).replace(/\D/g, '');
+            // Every lookup below is scoped to `company._id` — a lead in
+            // another company can never be matched by this reply.
+            let lead = await Lead.findOne({ company: company._id, mobileKey: digits });
+            if (!lead && digits.length >= 9) {
+                lead = await Lead.findOne({ company: company._id, mobileKey: new RegExp(`${digits.slice(-9)}$`) });
+            }
+
+            console.log('[webhook] lead lookup', { companyId: String(company._id), leadFound: !!lead });
 
             if (lead) {
                 await WhatsAppMessage.create({
@@ -593,9 +666,12 @@ export const webhook = asyncHandler(async (req, res) => {
                     mediaType: mediaType || '',
                     mediaFilename: mediaFilename || '',
                     status: 'replied',
+                    msg91RequestId: requestId || '',
+                    seen: false,
                 });
+                console.log('[webhook] inbound message saved (linked to lead)', { leadId: String(lead._id), companyId: String(company._id) });
 
-                const lastOut = await WhatsAppMessage.findOne({ lead: lead._id, direction: 'out' }).sort({ createdAt: -1 });
+                const lastOut = await WhatsAppMessage.findOne({ company: company._id, lead: lead._id, direction: 'out' }).sort({ createdAt: -1 });
                 if (lastOut) { lastOut.status = 'replied'; await lastOut.save(); }
 
                 if (lead.status === 'New') {
@@ -621,7 +697,7 @@ export const webhook = asyncHandler(async (req, res) => {
                     console.error('[whatsapp] Reply notification FAILED:', notifyErr.message);
                 }
 
-            } else if (company) {
+            } else {
                 await WhatsAppMessage.create({
                     company: company._id, lead: null,
                     contactName: contactName || '',
@@ -632,7 +708,10 @@ export const webhook = asyncHandler(async (req, res) => {
                     mediaType: mediaType || '',
                     mediaFilename: mediaFilename || '',
                     status: 'replied',
+                    msg91RequestId: requestId || '',
+                    seen: false,
                 });
+                console.log('[webhook] inbound message saved (unlinked contact)', { companyId: String(company._id) });
 
                 const lastOut = await WhatsAppMessage.findOne({ company: company._id, contactNumber: digits, lead: null, direction: 'out' }).sort({ createdAt: -1 });
                 if (lastOut) { lastOut.status = 'replied'; await lastOut.save(); }
@@ -650,6 +729,8 @@ export const webhook = asyncHandler(async (req, res) => {
                     console.error('[whatsapp] Unlinked-reply notification FAILED:', notifyErr.message);
                 }
             }
+        } else {
+            console.log('[webhook] payload had neither a recognizable status callback nor usable inbound content, skipping', { from, requestId });
         }
     }
 
