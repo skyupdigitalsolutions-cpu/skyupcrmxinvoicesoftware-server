@@ -329,6 +329,15 @@ export const listConversations = asyncHandler(async (req, res) => {
     // lead (from that point on, normal ownership rules apply).
     const restrictToOwner = req.user.role === 'sales';
 
+    // Build a reverse map: normalised contact number → leadId
+    // so we can detect when a raw-number entry actually belongs to an
+    // existing lead (messages sent before the lead was created / relinked).
+    const mobileToLeadId = new Map();
+    for (const lead of leads) {
+        const raw = String(lead.mobile || '').replace(/\D/g, '');
+        if (raw) mobileToLeadId.set(raw, String(lead._id));
+    }
+
     const rows = [...byKey.entries()]
         .map(([key, entry]) => {
             const { lastOut, lastIn, hasUnseen, leadId, contactNumber, contactName } = entry;
@@ -349,6 +358,18 @@ export const listConversations = asyncHandler(async (req, res) => {
                     lastResponseAt: lastIn ? lastIn.createdAt : null,
                     unread: hasUnseen,
                 };
+            }
+
+            // Raw contact number — check if this number belongs to an existing lead.
+            // This happens when messages were saved before the lead existed (customer
+            // messaged first, then was saved as lead). Without this check, the same
+            // person appears twice: once as a lead row and once as a "Save as Lead" row.
+            const rawContactDigits = String(contactNumber || '').replace(/\D/g, '');
+            const matchedLeadId = rawContactDigits ? mobileToLeadId.get(rawContactDigits) : null;
+            if (matchedLeadId) {
+                // This contact already exists as a lead — suppress the raw-number row
+                // entirely. The lead row (keyed L:leadId) already represents this person.
+                return null;
             }
 
             return {
