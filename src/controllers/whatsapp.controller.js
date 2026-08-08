@@ -214,6 +214,21 @@ export const sendReply = asyncHandler(async (req, res) => {
     const to = toE164(lead.mobile, lead.country);
     if (!to) throw new ApiError(400, 'Could not resolve a valid phone number for this lead.');
 
+    // Enforce 24-hour session window — free-form replies only allowed within
+    // 24 hours of the customer's last inbound message.
+    const session = await getSessionWindow(leadId, companyId);
+    if (!session.open) {
+        return res.status(403).json({
+            success: false,
+            code: 'SESSION_WINDOW_EXPIRED',
+            message: session.lastInboundAt
+                ? `The 24-hour reply window expired. Last customer message: ${new Date(session.lastInboundAt).toLocaleString()}. Send a template message to re-open the conversation.`
+                : 'No inbound message found from this customer. Send a template message to start the conversation.',
+            lastInboundAt: session.lastInboundAt,
+            expiresAt: session.expiresAt,
+        });
+    }
+
     try {
         const sendRes = await sendSessionMessage({
             authKey: company.msg91.authKey, integratedNumber: company.msg91.integratedNumber, to, text,
@@ -300,7 +315,7 @@ export const sendMedia = asyncHandler(async (req, res) => {
 // contacts so a reply from one of them is never invisible.
 export const listConversations = asyncHandler(async (req, res) => {
     const q = { ...tenantScope(req) };
-    const messages = await WhatsAppMessage.find(q).sort({ createdAt: -1 }).limit(2000).lean();
+    const messages = await WhatsAppMessage.find(q).sort({ createdAt: -1 }).limit(5000).lean();
 
     const byKey = new Map();
     for (const m of messages) {
@@ -319,7 +334,7 @@ export const listConversations = asyncHandler(async (req, res) => {
     }
 
     const leadIds = [...byKey.values()].filter((v) => v.leadId).map((v) => String(v.leadId));
-    const leads = await Lead.find({ _id: { $in: leadIds } }).select('name mobile country stage status owner ownerName').lean();
+    const leads = await Lead.find({ _id: { $in: leadIds } }).select('name mobile mobileKey country stage status owner ownerName').lean();
     const leadById = new Map(leads.map((l) => [String(l._id), l]));
 
     // Employees only see LEAD conversations they themselves added/own — same
@@ -329,13 +344,14 @@ export const listConversations = asyncHandler(async (req, res) => {
     // lead (from that point on, normal ownership rules apply).
     const restrictToOwner = req.user.role === 'sales';
 
-    // Build a reverse map: normalised contact number → leadId
-    // so we can detect when a raw-number entry actually belongs to an
-    // existing lead (messages sent before the lead was created / relinked).
+    // Build reverse lookup: mobile digits → leadId AND mobileKey → leadId
+    // Detects when a raw contactNumber (possibly with country code from toE164)
+    // belongs to an existing lead, preventing duplicate "Save as Lead" rows.
     const mobileToLeadId = new Map();
     for (const lead of leads) {
         const raw = String(lead.mobile || '').replace(/\D/g, '');
         if (raw) mobileToLeadId.set(raw, String(lead._id));
+        if (lead.mobileKey) mobileToLeadId.set(lead.mobileKey, String(lead._id));
     }
 
     const rows = [...byKey.entries()]
@@ -365,7 +381,24 @@ export const listConversations = asyncHandler(async (req, res) => {
             // messaged first, then was saved as lead). Without this check, the same
             // person appears twice: once as a lead row and once as a "Save as Lead" row.
             const rawContactDigits = String(contactNumber || '').replace(/\D/g, '');
-            const matchedLeadId = rawContactDigits ? mobileToLeadId.get(rawContactDigits) : null;
+            // Check exact match first, then suffix match (contactNumber may include
+            // country code prefix added by toE164 while lead.mobile may not)
+            let matchedLeadId = rawContactDigits ? mobileToLeadId.get(rawContactDigits) : null;
+            if (!matchedLeadId && rawContactDigits.length >= 7) {
+                // Suffix match: contactNumber may include country code from toE164
+                // e.g. lead.mobile='99704716', contactNumber stored='97199704716'
+                // Use mapKey (not 'key') to avoid shadowing the outer map entry key
+                for (const [mapKey, mapLeadId] of mobileToLeadId) {
+                    const mapDigits = String(mapKey).replace(/\D/g, '');
+                    if (mapDigits.length >= 7 && (
+                        rawContactDigits.endsWith(mapDigits.slice(-9)) ||
+                        mapDigits.endsWith(rawContactDigits.slice(-9))
+                    )) {
+                        matchedLeadId = mapLeadId;
+                        break;
+                    }
+                }
+            }
             if (matchedLeadId) {
                 // This contact already exists as a lead — suppress the raw-number row
                 // entirely. The lead row (keyed L:leadId) already represents this person.
@@ -395,11 +428,6 @@ export const listConversations = asyncHandler(async (req, res) => {
     res.json({ success: true, conversations: rows });
 });
 
-// Full thread for one lead (used by the "Continue Chat" drawer).
-// GET /whatsapp/template-status?leadIds=id1,id2&templateName=xyz
-// Returns per-lead status of whether a specific template was already sent,
-// when it was sent, and whether it succeeded or failed. Used by the bulk
-// send UI to warn agents before resending the same template to a lead.
 // ── Session window helper + endpoint ─────────────────────────────────────────
 async function getSessionWindow(leadId, companyId) {
     const lastInbound = await WhatsAppMessage.findOne({
@@ -491,7 +519,7 @@ export const getThreadByNumber = asyncHandler(async (req, res) => {
 
     const q = { ...tenantScope(req), contactNumber, lead: null };
     const messages = await WhatsAppMessage.find(q).sort({ createdAt: 1 });
-    if (!messages.length) throw new ApiError(404, 'No conversation found for that number.');
+    if (!messages.length) return res.json({ success: true, lead: { id: null, name: contactNumber, mobile: contactNumber, country: 'UAE' }, messages: [] });
 
     await WhatsAppMessage.updateMany(
         { ...q, direction: 'in', seen: false },
@@ -549,23 +577,57 @@ export const webhook = asyncHandler(async (req, res) => {
     const entries = Array.isArray(body.entry) ? body.entry : (Array.isArray(body) ? body : [body]);
 
     for (const entry of entries) {
-        const from        = entry.customerNumber || entry.from || (entry.contact && entry.contact.wa_id) || '';
-        const toNumber    = entry.integratedNumber || entry.integrated_number || entry.to || '';
-        const requestId   = entry.requestId || entry.request_id || entry.msg_id || entry.message_id || '';
-        const statusValue = entry.reason || entry.status || (entry.type === 'status' ? entry.status : '');
-        const text        = (typeof entry.text === 'string' ? entry.text : (entry.text && entry.text.body)) || entry.body || entry.caption || '';
-        const contactName = entry.customerName || '';
-        const mediaUrl      = entry.url || '';
-        const mediaType     = entry.messageType || '';
+        // MSG91 sends snake_case field names — support both snake_case and camelCase
+        // for backwards compatibility with any older payload format.
+        const from        = entry.customer_number || entry.customerNumber || entry.from || (entry.contact && entry.contact.wa_id) || '';
+        const toNumber    = entry.integrated_number || entry.integratedNumber || entry.to || '';
+        const requestId   = entry.request_id || entry.requestId || entry.msg_id || entry.message_id || '';
+        const statusValue = entry.status || entry.reason || (entry.type === 'status' ? entry.status : '');
+        const text        = entry.message || (typeof entry.text === 'string' ? entry.text : (entry.text && entry.text.body)) || entry.body || entry.caption || '';
+        const contactName = entry.customer_name || entry.customerName || '';
+        const mediaUrl      = entry.url || entry.media_url || '';
+        const mediaType     = entry.message_type || entry.messageType || '';
         const mediaFilename = entry.filename || '';
 
         if (!from && !requestId) continue;
 
-        const company = toNumber
-            ? await Company.findOne({ 'msg91.integratedNumber': toNumber })
-            : null;
+        // Company lookup — try exact match, then without country code prefix,
+        // then by last 10 digits (handles mismatched country code storage)
+        let company = null;
+        if (toNumber) {
+            const toDigits = toNumber.replace(/\D/g, '');
+            company = await Company.findOne({ $or: [
+                { 'msg91.integratedNumber': toNumber },
+                { 'msg91.integratedNumber': toDigits },
+                { 'msg91.integratedNumber': new RegExp(toDigits.slice(-10) + '$') },
+            ]});
+        }
+        // Fallback: if still no company found, use the only active company
+        // (safe for single-tenant deployments like this one)
+        if (!company) {
+            company = await Company.findOne({ 'msg91.enabled': true });
+        }
 
-        if (statusValue && requestId) {
+        // Direction MUST be checked first. Outbound status callbacks also have
+        // statusValue + requestId — if we checked status first, inbound messages
+        // that happen to carry a status field would be skipped as status updates.
+        const direction = entry.direction || '';
+
+        if (direction === 'outbound') {
+            // Outbound delivery/read/failed status update
+            const mapped = statusValue === 'delivered' ? 'delivered'
+                : statusValue === 'read' ? 'read'
+                : statusValue === 'failed' ? 'failed'
+                : null;
+            if (mapped && requestId) {
+                await WhatsAppMessage.updateOne({ msg91RequestId: requestId }, { $set: { status: mapped } });
+            }
+            continue;
+        }
+
+        // For messages with no direction field (older format), fall back to
+        // status+requestId check as before
+        if (!direction && statusValue && requestId) {
             const mapped = statusValue === 'delivered' ? 'delivered'
                 : statusValue === 'read' ? 'read'
                 : statusValue === 'failed' ? 'failed'
@@ -579,9 +641,15 @@ export const webhook = asyncHandler(async (req, res) => {
         if (from && (text || mediaUrl)) {
             const digits = String(from).replace(/\D/g, '');
             const leadQuery = company ? { company: company._id } : {};
+            // Try exact mobileKey match first
             let lead = await Lead.findOne({ ...leadQuery, mobileKey: digits });
+            // Try last 9 digits suffix — catches country code mismatches
             if (!lead && digits.length >= 9) {
                 lead = await Lead.findOne({ ...leadQuery, mobileKey: new RegExp(`${digits.slice(-9)}$`) });
+            }
+            // Try last 10 digits suffix
+            if (!lead && digits.length >= 10) {
+                lead = await Lead.findOne({ ...leadQuery, mobileKey: new RegExp(`${digits.slice(-10)}$`) });
             }
 
             if (lead) {
@@ -624,6 +692,34 @@ export const webhook = asyncHandler(async (req, res) => {
                 }
 
             } else if (company) {
+                // Lead not found — store as unlinked (lead: null).
+                // Also attempt a broader search using just the last 9 digits
+                // in case the lead's mobileKey has a different country code prefix.
+                if (!lead && digits.length >= 9) {
+                    lead = await Lead.findOne({
+                        company: company._id,
+                        mobileKey: new RegExp(digits.slice(-9) + '$'),
+                    });
+                }
+                if (lead) {
+                    // Found via suffix match — store properly linked to lead
+                    await WhatsAppMessage.create({
+                        company: lead.company, lead: lead._id,
+                        contactName: contactName || lead.name,
+                        contactNumber: digits, contactCountry: lead.country,
+                        direction: 'in', kind: 'session',
+                        text: text || '', mediaUrl: mediaUrl || '',
+                        mediaType: mediaType || '', mediaFilename: mediaFilename || '',
+                        status: 'replied',
+                    });
+                    const lastOut2 = await WhatsAppMessage.findOne({ lead: lead._id, direction: 'out' }).sort({ createdAt: -1 });
+                    if (lastOut2) { lastOut2.status = 'replied'; await lastOut2.save(); }
+                    try {
+                        const recipients2 = await ownerAndAdmins(lead.company, lead.owner);
+                        const preview2 = text ? (text.length > 80 ? `${text.slice(0, 80)}…` : text) : `[${mediaType || 'media'} received]`;
+                        await notifyUsers({ company: lead.company, recipients: recipients2, type: 'whatsapp-reply', title: `${lead.name} replied on WhatsApp`, body: preview2, link: '/communication' });
+                    } catch (e) { console.error('[whatsapp] notify FAILED:', e.message); }
+                } else {
                 await WhatsAppMessage.create({
                     company: company._id, lead: null,
                     contactName: contactName || '',
@@ -651,6 +747,7 @@ export const webhook = asyncHandler(async (req, res) => {
                 } catch (notifyErr) {
                     console.error('[whatsapp] Unlinked-reply notification FAILED:', notifyErr.message);
                 }
+                } // end else (lead not found via suffix)
             }
         }
     }
