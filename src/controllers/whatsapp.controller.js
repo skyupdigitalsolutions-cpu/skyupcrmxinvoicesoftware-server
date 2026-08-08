@@ -354,6 +354,22 @@ export const listConversations = asyncHandler(async (req, res) => {
         if (lead.mobileKey) mobileToLeadId.set(lead.mobileKey, String(lead._id));
     }
 
+    // CRITICAL: also load ALL leads in this company that have a mobile number —
+    // not just leads with linked messages. A lead may exist but ALL its messages
+    // were stored as contactNumber-only (lead: null) — those leads won't appear
+    // in leadIds above, so they'd never be in mobileToLeadId, and the "Save as
+    // Lead" button would incorrectly show for them.
+    // Only load mobile + mobileKey to keep this query lightweight.
+    const allCompanyLeads = await Lead.find(
+        { ...tenantScope(req), mobile: { $exists: true, $ne: '' } },
+        { _id: 1, mobile: 1, mobileKey: 1 }
+    ).lean();
+    for (const lead of allCompanyLeads) {
+        const raw = String(lead.mobile || '').replace(/\D/g, '');
+        if (raw && !mobileToLeadId.has(raw)) mobileToLeadId.set(raw, String(lead._id));
+        if (lead.mobileKey && !mobileToLeadId.has(lead.mobileKey)) mobileToLeadId.set(lead.mobileKey, String(lead._id));
+    }
+
     const rows = [...byKey.entries()]
         .map(([key, entry]) => {
             const { lastOut, lastIn, hasUnseen, leadId, contactNumber, contactName } = entry;
