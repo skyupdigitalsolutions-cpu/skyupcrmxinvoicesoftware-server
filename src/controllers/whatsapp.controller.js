@@ -135,14 +135,55 @@ export const sendTemplate = asyncHandler(async (req, res) => {
         throw new ApiError(400, 'MSG91 is not configured/enabled for this company yet.');
     }
 
+    // Resolve the template's own approved language + variable count. Meta rejects
+    // a send whose language code doesn't match the approved translation (a common
+    // cause of one template working — e.g. en — while another silently fails
+    // because it was approved under en_US/ar). Never hard-default to 'en' here:
+    // prefer the caller-supplied language, then the template's stored language.
+    const templateDoc = await WhatsAppTemplate.findOne({ name: templateName, ...tenantScope(req) });
+    const effectiveLanguage = language || templateDoc?.language || 'en';
+
+    // How many body variables the template ACTUALLY needs. The stored
+    // `variableCount` is admin-entered and frequently left at its default of 0
+    // even when the body contains {{1}}/{{2}} — which makes Meta reject the send
+    // ("Hello {{1}}," goes out with no body param). So we also scan the body
+    // preview for the highest {{n}} placeholder and take whichever is larger.
+    // This auto-heals templates whose variableCount was never set correctly.
+    const detectVarCountFromBody = (preview) => {
+        let max = 0, m;
+        const re = /\{\{\s*(\d+)\s*\}\}/g;
+        while ((m = re.exec(preview || '')) !== null) {
+            const n = Number(m[1]);
+            if (Number.isFinite(n) && n > max) max = n;
+        }
+        return max;
+    };
+    const templateVarCount = Math.max(
+        Math.max(0, Number(templateDoc?.variableCount) || 0),
+        detectVarCountFromBody(templateDoc?.bodyPreview)
+    );
+
+    // Pads the variable array up to the template's declared count so the payload
+    // always carries the right number of body params, then applies the name
+    // auto-fill. Padding first is what lets autoFillNameVar work even when the
+    // caller sent an empty variables array (the single-lead "Send Template"
+    // modal used to do exactly that).
+    const buildVars = (rawVars, nameForAutofill) => {
+        let vars = Array.isArray(rawVars) ? [...rawVars] : [];
+        if (templateVarCount > 0) {
+            while (vars.length < templateVarCount) vars.push('');
+        }
+        if (autoFillNameVar && vars.length) vars[0] = nameForAutofill || vars[0];
+        return vars;
+    };
+
     const results = [];
 
     // ── Existing leads ───────────────────────────────────────────────────────
     const leads = hasLeadIds ? await Lead.find({ _id: { $in: leadIds }, ...tenantScope(req) }) : [];
     for (const lead of leads) {
         const to = toE164(lead.mobile, lead.country);
-        let vars = Array.isArray(variables) ? [...variables] : [];
-        if (autoFillNameVar && vars.length) vars[0] = lead.name || vars[0];
+        const vars = buildVars(variables, lead.name);
 
         const base = {
             company: companyId, lead: lead._id,
@@ -158,7 +199,7 @@ export const sendTemplate = asyncHandler(async (req, res) => {
         try {
             const sendRes = await sendTemplateMessage({
                 authKey: company.msg91.authKey, integratedNumber: company.msg91.integratedNumber,
-                to, templateName, language, variables: vars,
+                to, templateName, language: effectiveLanguage, variables: vars,
             });
             await WhatsAppMessage.create({ ...base, status: 'sent', msg91RequestId: sendRes.requestId });
             results.push({ leadId: lead._id, status: 'sent' });
@@ -174,8 +215,7 @@ export const sendTemplate = asyncHandler(async (req, res) => {
         for (const c of contacts) {
             const country = c.country || 'UAE';
             const to = toE164(c.mobile, country);
-            let vars = Array.isArray(variables) ? [...variables] : [];
-            if (autoFillNameVar && vars.length) vars[0] = c.name || vars[0];
+            const vars = buildVars(variables, c.name);
 
             const base = {
                 company: companyId, lead: null,
@@ -191,7 +231,7 @@ export const sendTemplate = asyncHandler(async (req, res) => {
             try {
                 const sendRes = await sendTemplateMessage({
                     authKey: company.msg91.authKey, integratedNumber: company.msg91.integratedNumber,
-                    to, templateName, language, variables: vars,
+                    to, templateName, language: effectiveLanguage, variables: vars,
                 });
                 await WhatsAppMessage.create({ ...base, status: 'sent', msg91RequestId: sendRes.requestId });
                 results.push({ contactNumber: to, status: 'sent' });
@@ -569,7 +609,19 @@ export const webhook = asyncHandler(async (req, res) => {
         const from        = entry.sender || entry.customerNumber || entry.from || message?.from || contact?.wa_id || '';
         const toNumber     = entry.integrated_number || entry.integratedNumber || entry.to || '';
         const requestId    = entry.message_uuid || entry.messageUuid || message?.id || entry.requestId || entry.request_id || entry.msg_id || entry.message_id || '';
-        const statusValue  = entry.reason || entry.status || (entry.type === 'status' ? entry.status : '');
+        // Delivery status (delivered/read/failed/sent). Kept SEPARATE from any
+        // human-readable failure reason: MSG91 sometimes carries the status in
+        // `status` and sometimes echoes it in `reason`, and on failure `reason`
+        // holds the actual error text. Conflating them meant a failed callback
+        // that carried a reason string never matched 'failed' and lost its reason.
+        const rawStatus = String(entry.status || entry.reason || (entry.type === 'status' ? entry.status : '') || '').toLowerCase();
+        const statusValue = ['delivered', 'read', 'failed', 'undelivered', 'sent'].find((s) => rawStatus.includes(s)) || rawStatus;
+        // Human-readable failure reason, if MSG91 included one on a failed callback.
+        const statusReason =
+            (typeof entry.reason === 'string' && !['delivered', 'read', 'failed', 'sent', 'undelivered'].includes(entry.reason.toLowerCase()) ? entry.reason : '') ||
+            entry.error?.message || entry.error?.title ||
+            (Array.isArray(entry.errors) && entry.errors[0] && (entry.errors[0].message || entry.errors[0].title)) ||
+            entry.errorMessage || entry.description || '';
         const text         = (typeof entry.text === 'string' ? entry.text : (entry.text && entry.text.body)) || message?.text?.body || entry.body || entry.caption || '';
         const contactName  = entry.customer_name || entry.customerName || contact?.profile?.name || '';
 
