@@ -138,7 +138,7 @@ const noteSchema = new mongoose.Schema(
 // visibility is enforced in the controller, not here.
 const editHistorySchema = new mongoose.Schema(
   {
-    by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },},
+    by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     byName: { type: String, default: '' },
     at: { type: Date, default: Date.now },
     changes: {
