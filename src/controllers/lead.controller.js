@@ -560,7 +560,8 @@ export const mergeLeads = asyncHandler(async(req, res) => {
             mergedNotes += dup.notes.length;
         }
         if (dup.editHistory && dup.editHistory.length) {
-            keepLead.editHistory.push(...dup.editHistory);
+            // Filter out any entries with null 'by' (from auto-advances on unowned leads)
+            keepLead.editHistory.push(...dup.editHistory.filter(e => e.by));
         }
         // Record the merge itself as an edit-history entry for oversight.
         keepLead.editHistory.push({
