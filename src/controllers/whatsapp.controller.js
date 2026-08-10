@@ -621,7 +621,7 @@ export const webhook = asyncHandler(async (req, res) => {
                 try {
                     const recipients = await ownerAndAdmins(lead.company, lead.owner);
                     const preview = text ? (text.length > 80 ? `${text.slice(0,80)}…` : text) : `[${rawContentType} received]`;
-                    await notifyUsers({ company: lead.company, recipients, type: 'whatsapp-reply', title: `${lead.name} replied on WhatsApp`, body: preview, link: '/communication' });
+                    await notifyUsers({ company: lead.company, recipients, type: 'whatsapp-reply', title: `${lead.name} replied on WhatsApp${lead.ownerName ? ' · ' + lead.ownerName.split(' ')[0] : ''}`, body: preview, link: '/communication' });
                 } catch (e) { console.error('[whatsapp] notify FAILED:', e.message); }
 
             } else if (company) {
@@ -642,7 +642,7 @@ export const webhook = asyncHandler(async (req, res) => {
                     try {
                         const r2 = await ownerAndAdmins(lead.company, lead.owner);
                         const p2 = text ? (text.length > 80 ? `${text.slice(0,80)}…` : text) : `[${rawContentType} received]`;
-                        await notifyUsers({ company: lead.company, recipients: r2, type: 'whatsapp-reply', title: `${lead.name} replied on WhatsApp`, body: p2, link: '/communication' });
+                        await notifyUsers({ company: lead.company, recipients: r2, type: 'whatsapp-reply', title: `${lead.name} replied on WhatsApp${lead.ownerName ? ' · ' + lead.ownerName.split(' ')[0] : ''}`, body: p2, link: '/communication' });
                     } catch (e) { console.error('[whatsapp] notify FAILED:', e.message); }
                 } else {
                     // Truly unknown — store unlinked
