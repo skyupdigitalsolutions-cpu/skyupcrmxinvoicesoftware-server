@@ -13,9 +13,9 @@ import {
     getThread,
     getThreadByNumber,
     relinkContact,
-    getSessionWindow,
-    getTemplateSentStatus,
     webhook,
+    getTemplateSentStatus,
+    getSessionWindowStatus,
 } from '../controllers/whatsapp.controller.js';
 import { protect } from '../middleware/auth.js';
 
@@ -41,14 +41,10 @@ router.post('/reply', sendReply);
 router.post('/send-media', sendMedia);
 
 router.get('/conversations', listConversations);
+router.get('/session-window/:leadId', getSessionWindowStatus);
+router.get('/template-status', getTemplateSentStatus);
 router.get('/thread/:leadId', getThread);
 router.get('/thread-by-number/:contactNumber', getThreadByNumber);
 router.post('/relink-contact', relinkContact);
-
-// Session window — tells the UI whether the 24h free-reply window is open
-router.get('/session-window/:leadId', getSessionWindow);
-
-// Template sent status — bulk send modal uses this to grey out already-sent leads
-router.post('/template-sent-status', getTemplateSentStatus);
 
 export default router;
