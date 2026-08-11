@@ -124,6 +124,15 @@ export const listLeads = asyncHandler(async(req, res) => {
         if (phone) q.$or.push({ mobileKey: phone.mobileKeyRegex });
     }
 
+    // Support ?fields=_id,name,mobile,... for lean projections (e.g. blast modal).
+    // When fields param is present, return plain objects — no toObject/toSafeJSON overhead.
+    const { fields } = req.query;
+    if (fields) {
+        const projection = fields.split(',').reduce((acc, f) => { acc[f.trim()] = 1; return acc; }, {});
+        const leanLeads = await Lead.find(q).select(projection).sort({ createdAt: -1 }).lean();
+        return res.json({ success: true, leads: leanLeads });
+    }
+
     const leads = await Lead.find(q).sort({ createdAt: -1 });
 
     // Edit history is admin-only — strip it out for sales users' own view.

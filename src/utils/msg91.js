@@ -54,13 +54,28 @@ function buildSessionPayload({ integratedNumber, to, text }) {
 // top-level recipient_number shape as the text session message, since both
 // go through the non-bulk single-message endpoint.
 function buildMediaPayload({ integratedNumber, to, mediaType, mediaUrl, caption, filename }) {
+    // MSG91 media payload — mirrors the session message shape with top-level
+    // recipient_number + content_type, plus a payload wrapper containing the
+    // media object. The payload.type must be the media kind (document/image/video/audio).
+    const mediaObj = {
+        link: mediaUrl,
+        ...(caption ? { caption } : {}),
+        ...(mediaType === 'document' && filename ? { filename } : {}),
+    };
     return {
         integrated_number: integratedNumber,
         recipient_number: to,
-        content_type: mediaType,
-        attachment_url: mediaUrl,
+        content_type: mediaType,          // top-level hint
+        attachment_url: mediaUrl,          // some MSG91 account types read this
         ...(caption ? { caption } : {}),
         ...(mediaType === 'document' && filename ? { filename } : {}),
+        payload: {
+            messaging_product: 'whatsapp',
+            recipient_type: 'individual',
+            to,
+            type: mediaType,
+            [mediaType]: mediaObj,         // e.g. payload.document = { link, filename }
+        },
     };
 }
 

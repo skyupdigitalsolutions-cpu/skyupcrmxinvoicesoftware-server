@@ -8,6 +8,7 @@ import { tenantScope, tenantCompanyId } from '../middleware/auth.js';
 import { sendTemplateMessage, sendSessionMessage, sendMediaMessage } from '../utils/msg91.js';
 import { uploadChatAttachment } from '../utils/cloudinary.js';
 import { toE164 } from '../utils/phone.js';
+import { DeletedContact } from '../models/DeletedContact.js';
 import { notifyUsers, ownerAndAdmins, adminsOf } from '../utils/notify.js';
 
 const requireAdmin = (req) => {
@@ -217,7 +218,7 @@ export const sendMedia = asyncHandler(async (req, res) => {
         const msg = await WhatsAppMessage.create({ company: companyId, lead: lead._id, direction: 'out', kind: 'session', text: caption || '', mediaUrl: uploaded.url, mediaType, mediaFilename: filename || '', status: 'sent', msg91RequestId: sendRes.requestId, sentBy: req.user._id });
         res.status(201).json({ success: true, savedMessage: msg.toSafeJSON() });
     } catch (err) {
-        console.error('[whatsapp] sendMedia FAILED:', err.message);
+        console.error('[whatsapp] sendMedia FAILED:', err.message, '| status:', err.msg91Status, '| raw:', err.msg91RawText || '');
         const msg = await WhatsAppMessage.create({ company: companyId, lead: lead._id, direction: 'out', kind: 'session', text: caption || '', mediaUrl: uploaded.url, mediaType, mediaFilename: filename || '', status: 'failed', error: err.message || 'Send failed', sentBy: req.user._id });
         const reason = err.message || 'Send failed';
         res.status(502).json({ success: false, message: reason, error: reason, savedMessage: msg.toSafeJSON() });
@@ -252,22 +253,43 @@ export const listConversations = asyncHandler(async (req, res) => {
         ? await Lead.find({ _id: { $in: leadIds } }).select('name mobile mobileKey country status owner ownerName').lean()
         : [];
 
-    // Some leads have ownerName: '' (created before ownerName was stored,
-    // or assigned via ID without caching the name). Resolve missing names
-    // from the User collection in one batch query.
-    const missingOwnerIds = [...new Set(
-        leads.filter(l => !l.ownerName && l.owner).map(l => String(l.owner))
+    // Validate ownerNames against active users in one batch query.
+    // This handles two cases:
+    //   1. ownerName is '' (lead created before ownerName caching was added)
+    //   2. ownerName is stale (user was deleted/deactivated after being assigned)
+    // Only active users in this company are valid — deleted users show no badge.
+    const allOwnerIds = [...new Set(
+        leads.filter(l => l.owner).map(l => String(l.owner))
     )];
-    if (missingOwnerIds.length) {
+    if (allOwnerIds.length) {
         const { User } = await import('../models/User.js');
-        const users = await User.find({ _id: { $in: missingOwnerIds } }).select('name').lean();
-        const userMap = new Map(users.map(u => [String(u._id), u.name]));
+        const activeUsers = await User.find({
+            _id: { $in: allOwnerIds },
+            active: true,
+        }).select('name').lean();
+        const activeUserMap = new Map(activeUsers.map(u => [String(u._id), u.name]));
         leads.forEach(l => {
-            if (!l.ownerName && l.owner) l.ownerName = userMap.get(String(l.owner)) || '';
+            if (l.owner) {
+                // Use live name from DB — clears stale names and fills missing ones
+                // Only show name if user is still active in the system
+                l.ownerName = activeUserMap.get(String(l.owner)) || '';
+            }
         });
     }
 
     const leadById = new Map(leads.map(l => [String(l._id), l]));
+
+    // Build a set of deleted mobileKeys so we can suppress conversations
+    // for leads that were deleted — their WhatsAppMessages still exist in DB
+    // but should not appear in the communication list.
+    const deletedKeys = await DeletedContact.find(
+        { company: scope.company },
+        { mobileKey: 1, mobile: 1 }
+    ).lean();
+    const deletedMobileKeys = new Set([
+        ...deletedKeys.map(d => d.mobileKey).filter(Boolean),
+        ...deletedKeys.map(d => String(d.mobile || '').replace(/\D/g, '')).filter(Boolean),
+    ]);
 
     const restrictToOwner = req.user.role === 'sales';
 
@@ -313,8 +335,21 @@ export const listConversations = asyncHandler(async (req, res) => {
 
         if (!contactNumber) return null;
 
-        // Suppress raw-contact rows for numbers that belong to a known lead
+        // Suppress conversations for deleted leads' numbers
         const rawDigits = String(contactNumber).replace(/\D/g, '');
+        if (deletedMobileKeys.has(rawDigits)) return null;
+        if (rawDigits.length >= 9) {
+            for (const dk of deletedMobileKeys) {
+                const dkDigits = String(dk).replace(/\D/g, '');
+                if (dkDigits.length >= 9 && (
+                    rawDigits.endsWith(dkDigits.slice(-9)) ||
+                    dkDigits.endsWith(rawDigits.slice(-9))
+                )) return null;
+            }
+        }
+
+        // Suppress raw-contact rows for numbers that belong to a known lead
+        
         let matchedLeadId = rawDigits ? mobileToLeadId.get(rawDigits) : null;
         if (!matchedLeadId && rawDigits.length >= 7) {
             for (const [k, v] of mobileToLeadId) {

@@ -50,6 +50,14 @@ const whatsAppMessageSchema = new mongoose.Schema(
 
 whatsAppMessageSchema.index({ company: 1, lead: 1, createdAt: 1 });
 whatsAppMessageSchema.index({ company: 1, contactNumber: 1, createdAt: 1 });
+// Compound indexes for listConversations aggregation ($match + $sort + $group)
+whatsAppMessageSchema.index({ company: 1, createdAt: -1 });
+// For getSessionWindow — last inbound per lead
+whatsAppMessageSchema.index({ lead: 1, company: 1, direction: 1, createdAt: -1 });
+// For webhook dedup check
+whatsAppMessageSchema.index({ msg91RequestId: 1, direction: 1 }, { sparse: true });
+// For outbound status update
+whatsAppMessageSchema.index({ msg91RequestId: 1, contactNumber: 1 });
 
 whatsAppMessageSchema.methods.toSafeJSON = function () {
   return {
