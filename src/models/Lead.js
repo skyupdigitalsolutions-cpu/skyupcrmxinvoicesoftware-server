@@ -136,9 +136,30 @@ const noteSchema = new mongoose.Schema(
 // One entry per edit action (a single save may touch several fields — all
 // changed fields from that save are grouped into one entry). Admin-only
 // visibility is enforced in the controller, not here.
+//
+// NOTE on `by`: This field is intentionally nullable. The monthly stage-reset
+// scheduler writes editHistory entries via updateMany() (bypassing Mongoose
+// validation) with by: null because the action has no human actor. Mongoose 8
+// re-validates ALL subdocuments in an array on every lead.save(), so without
+// `required: false` + the null-safe validator below, any lead that was
+// auto-reset will throw "Path 'by' is required" the next time a human edits
+// it. The validator explicitly allows null/undefined so auto-reset entries
+// survive re-validation while still rejecting genuinely bad (non-ObjectId)
+// values.
 const editHistorySchema = new mongoose.Schema(
   {
-    by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    by: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+      required: false,
+      validate: {
+        validator: function (v) {
+          return v === null || v === undefined || mongoose.isValidObjectId(v);
+        },
+        message: 'editHistory.by must be a valid ObjectId or null',
+      },
+    },
     byName: { type: String, default: '' },
     at: { type: Date, default: Date.now },
     changes: {
