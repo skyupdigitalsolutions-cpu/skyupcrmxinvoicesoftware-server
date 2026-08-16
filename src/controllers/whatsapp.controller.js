@@ -230,21 +230,60 @@ export const sendMedia = asyncHandler(async (req, res) => {
 export const listConversations = asyncHandler(async (req, res) => {
     const scope = tenantScope(req);
 
-    // Single aggregation: get last outbound + last inbound + unseen count per lead/contact
+    // Aggregation: get last outbound + last inbound + unseen count per lead/contact.
+    //
+    // FIX: The previous $first + $cond pattern picked the most recent doc in
+    // the group and returned null if its direction wasn't the one being looked
+    // for. In an active chat where the customer replied last, `lastOut` was
+    // always null — showing blank status/template for every active conversation.
+    //
+    // Fix: collect all docs per group with $push, then use $filter + $first
+    // in a separate $addFields stage to independently pick the most recent
+    // outbound AND the most recent inbound from the same sorted set.
+    // The $sort + $push preserves insertion order (most recent first) so
+    // $first after $filter gives the most recent of each direction correctly.
     const agg = await WhatsAppMessage.aggregate([
         { $match: scope },
         { $sort: { createdAt: -1 } },
         {
             $group: {
                 _id: { lead: '$lead', contactNumber: { $cond: ['$lead', null, '$contactNumber'] } },
-                lastOut:      { $first: { $cond: [{ $eq: ['$direction', 'out'] }, '$$ROOT', null] } },
-                lastIn:       { $first: { $cond: [{ $eq: ['$direction', 'in'] }, '$$ROOT', null] } },
+                // Collect ALL messages per group (sorted descending by the $sort above).
+                // $push preserves document order from the preceding $sort stage.
+                allMessages:  { $push: '$$ROOT' },
                 hasUnseen:    { $max: { $cond: [{ $and: [{ $eq: ['$direction', 'in'] }, { $eq: ['$seen', false] }] }, 1, 0] } },
                 contactName:  { $first: '$contactName' },
                 leadId:       { $first: '$lead' },
                 contactNumber:{ $first: { $cond: ['$lead', null, '$contactNumber'] } },
             },
         },
+        // Pick the most recent outbound and most recent inbound independently
+        // from the full sorted message list collected above.
+        {
+            $addFields: {
+                lastOut: {
+                    $first: {
+                        $filter: {
+                            input: '$allMessages',
+                            as: 'msg',
+                            cond: { $eq: ['$$msg.direction', 'out'] },
+                        },
+                    },
+                },
+                lastIn: {
+                    $first: {
+                        $filter: {
+                            input: '$allMessages',
+                            as: 'msg',
+                            cond: { $eq: ['$$msg.direction', 'in'] },
+                        },
+                    },
+                },
+            },
+        },
+        // Drop the raw messages array — it's only needed for the addFields above
+        // and we don't want to send thousands of message objects to Node memory.
+        { $project: { allMessages: 0 } },
     ]);
 
     // Collect lead IDs to fetch names/owners in one query
@@ -376,8 +415,23 @@ export const listConversations = asyncHandler(async (req, res) => {
     })
     .filter(Boolean)
     .sort((a, b) => {
+        // Unread conversations always float to the top.
         if (a.unread !== b.unread) return a.unread ? -1 : 1;
-        return new Date(b.lastSentAt || b.lastResponseAt || 0) - new Date(a.lastSentAt || a.lastResponseAt || 0);
+        // FIX: use max(lastSentAt, lastResponseAt) so a conversation where the
+        // customer replied most recently ranks above one where we sent last but
+        // longer ago. The previous `lastSentAt || lastResponseAt` fell back only
+        // when lastSentAt was null — but now that lastOut is correctly resolved
+        // (not null when the customer replied last), we need an explicit max so
+        // the most recently active conversation (either direction) sorts first.
+        const tB = Math.max(
+            new Date(b.lastSentAt || 0).getTime(),
+            new Date(b.lastResponseAt || 0).getTime()
+        );
+        const tA = Math.max(
+            new Date(a.lastSentAt || 0).getTime(),
+            new Date(a.lastResponseAt || 0).getTime()
+        );
+        return tB - tA;
     });
 
     res.json({ success: true, conversations: rows });
@@ -571,6 +625,11 @@ export const webhook = asyncHandler(async (req, res) => {
         if (!from && !requestId) { console.log('[webhook] skip — no from and no requestId'); continue; }
 
         // ── Company lookup ────────────────────────────────────────────────────
+        // Resolved by matching the integratedNumber (our WA number) from the
+        // payload to the company that owns it. This is the only safe way to
+        // route in a multi-tenant setup — falling back to "any company with
+        // msg91.enabled" (the previous behaviour) would route a message to a
+        // random tenant whenever toNumber was missing, which is wrong.
         let company = null;
         if (toNumber) {
             const toDigits = toNumber.replace(/\D/g, '');
@@ -580,8 +639,13 @@ export const webhook = asyncHandler(async (req, res) => {
                 { 'msg91.integratedNumber': new RegExp(toDigits.slice(-10) + '$') },
             ]});
         }
-        if (!company) company = await Company.findOne({ 'msg91.enabled': true });
-        console.log(`[webhook] company: ${company ? company.name : 'NOT FOUND'}`);
+        // FIX: removed the unsafe fallback `Company.findOne({ 'msg91.enabled': true })`
+        // that was here before. In a single-company setup it worked fine, but with
+        // multiple tenants it would pick a random company whenever toNumber was
+        // absent — routing the message (and notifications) to the wrong tenant.
+        // Now: if toNumber is missing or doesn't match any company, the entry is
+        // dropped cleanly at the existing `else` branch below (line: no company).
+        console.log(`[webhook] company: ${company ? company.name : 'NOT FOUND (toNumber=' + toNumber + ')'}`);
 
         // ── Delivery status callback ──────────────────────────────────────────
         // A delivery report has a status field AND direction "outbound", OR
@@ -647,10 +711,33 @@ export const webhook = asyncHandler(async (req, res) => {
                 const lastOut = await WhatsAppMessage.findOne({ lead: lead._id, direction: 'out' }).sort({ createdAt: -1 });
                 if (lastOut && lastOut.status !== 'replied') { lastOut.status = 'replied'; await lastOut.save(); }
 
+                // Auto-advance New → Contacted when the customer replies.
+                // Wrapped in try/catch so a Mongoose validation error on this
+                // lead (e.g. stale null editHistory entries from the monthly
+                // reset scheduler — see Lead.js fix note) does NOT throw out of
+                // the webhook handler. Without this guard the entire webhook
+                // returns a 500, MSG91 retries, and the same WhatsApp message
+                // (already stored above) gets stored again if the dedup requestId
+                // is absent. The WhatsApp message is always stored first (above)
+                // so wrapping only the save here means the message is never lost.
                 if (lead.status === 'New') {
-                    lead.status = 'Contacted';
-                    if (lead.owner) lead.editHistory.push({ by: lead.owner, byName: 'WhatsApp (auto)', changes: [{ field: 'status', from: 'New', to: 'Contacted — replied on WhatsApp' }] });
-                    await lead.save();
+                    try {
+                        lead.status = 'Contacted';
+                        if (lead.owner) {
+                            lead.editHistory.push({
+                                by: lead.owner,
+                                byName: 'WhatsApp (auto)',
+                                changes: [{ field: 'status', from: 'New', to: 'Contacted — replied on WhatsApp' }],
+                            });
+                        }
+                        await lead.save();
+                    } catch (saveErr) {
+                        // Non-fatal: log and continue. The WhatsApp message is
+                        // already stored. The lead status stays 'New' — the owner
+                        // can update it manually. This is better than a 500 that
+                        // triggers MSG91 retries.
+                        console.error(`[webhook] lead.save() failed for auto-status update on lead ${lead._id} — message stored, status not updated:`, saveErr.message);
+                    }
                 }
 
                 try {
@@ -660,41 +747,34 @@ export const webhook = asyncHandler(async (req, res) => {
                 } catch (e) { console.error('[whatsapp] notify FAILED:', e.message); }
 
             } else if (company) {
-                // Secondary suffix pass
-                if (digits.length >= 9) {
-                    lead = await Lead.findOne({ company: company._id, mobileKey: new RegExp(digits.slice(-9) + '$') });
-                }
+                // The primary lead lookup above already tried:
+                //   1. exact mobileKey match          (digits)
+                //   2. 9-digit suffix regex match     (digits.slice(-9))
+                //   3. 10-digit suffix regex match    (digits.slice(-10))
+                // FIX: removed the "secondary suffix pass" that was here before —
+                // it re-tried only digits.slice(-9), which is identical to attempt
+                // 2 above and always returned the same null result. It was dead code
+                // that fired an unnecessary DB query on every unmatched message.
+                //
+                // If all three lookups returned null, the number is genuinely
+                // unknown — store the message unlinked so it appears in the
+                // Communication page and the admin can use "Add as Lead" or
+                // "Relink Contact" from there.
 
-                if (lead) {
-                    await WhatsAppMessage.create({
-                        company: lead.company, lead: lead._id,
-                        contactName: contactName || lead.name, contactNumber: digits, contactCountry: lead.country,
-                        ...msgBase,
-                    });
-                    console.log(`[webhook] ✓ stored via secondary match for ${lead.name}`);
-                    const lastOut2 = await WhatsAppMessage.findOne({ lead: lead._id, direction: 'out' }).sort({ createdAt: -1 });
-                    if (lastOut2 && lastOut2.status !== 'replied') { lastOut2.status = 'replied'; await lastOut2.save(); }
-                    try {
-                        const r2 = await ownerAndAdmins(lead.company, lead.owner);
-                        const p2 = text ? (text.length > 80 ? `${text.slice(0,80)}…` : text) : `[${rawContentType} received]`;
-                        await notifyUsers({ company: lead.company, recipients: r2, type: 'whatsapp-reply', title: `${lead.name} replied on WhatsApp${lead.ownerName ? ' · ' + lead.ownerName.split(' ')[0] : ''}`, body: p2, link: '/communication' });
-                    } catch (e) { console.error('[whatsapp] notify FAILED:', e.message); }
-                } else {
-                    // Truly unknown — store unlinked
-                    await WhatsAppMessage.create({
-                        company: company._id, lead: null,
-                        contactName: contactName || '', contactNumber: digits, contactCountry: '',
-                        ...msgBase,
-                    });
-                    console.log(`[webhook] ✓ stored unlinked from ${digits}`);
-                    const lastOut3 = await WhatsAppMessage.findOne({ company: company._id, contactNumber: digits, lead: null, direction: 'out' }).sort({ createdAt: -1 });
-                    if (lastOut3 && lastOut3.status !== 'replied') { lastOut3.status = 'replied'; await lastOut3.save(); }
-                    try {
-                        const admins = await adminsOf(company._id);
-                        const preview = text ? (text.length > 80 ? `${text.slice(0,80)}…` : text) : `[${rawContentType} received]`;
-                        await notifyUsers({ company: company._id, recipients: admins, type: 'whatsapp-reply-unlinked', title: `${digits} replied on WhatsApp — not yet a lead`, body: preview, link: '/communication' });
-                    } catch (e) { console.error('[whatsapp] unlinked notify FAILED:', e.message); }
-                }
+                // Truly unknown number — store unlinked
+                await WhatsAppMessage.create({
+                    company: company._id, lead: null,
+                    contactName: contactName || '', contactNumber: digits, contactCountry: '',
+                    ...msgBase,
+                });
+                console.log(`[webhook] ✓ stored unlinked from ${digits}`);
+                const lastOut3 = await WhatsAppMessage.findOne({ company: company._id, contactNumber: digits, lead: null, direction: 'out' }).sort({ createdAt: -1 });
+                if (lastOut3 && lastOut3.status !== 'replied') { lastOut3.status = 'replied'; await lastOut3.save(); }
+                try {
+                    const admins = await adminsOf(company._id);
+                    const preview = text ? (text.length > 80 ? `${text.slice(0,80)}…` : text) : `[${rawContentType} received]`;
+                    await notifyUsers({ company: company._id, recipients: admins, type: 'whatsapp-reply-unlinked', title: `${digits} replied on WhatsApp — not yet a lead`, body: preview, link: '/communication' });
+                } catch (e) { console.error('[whatsapp] unlinked notify FAILED:', e.message); }
             } else {
                 console.log(`[webhook] ✗ no company for toNumber=${toNumber} — dropped`);
             }
