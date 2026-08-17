@@ -551,16 +551,34 @@ export const webhook = asyncHandler(async (req, res) => {
         : (Array.isArray(body) ? body : [body]);
 
     for (const entry of entries) {
-        // ── Field extraction — supports both camelCase (confirmed production)
-        //    and snake_case (older/callback format) ───────────────────────────
+        // ── Field extraction — supports camelCase (older confirmed-production
+        //    format), snake_case (older/callback format), AND the Cloud-API-
+        //    style shape MSG91 sends after switching to their newer webhook
+        //    format ("sender" at top level, plus "messages": [{ from }] and
+        //    "contacts": [{ wa_id }] arrays instead of a single flat/nested
+        //    field). Without the sender/messages/contacts fallbacks, `from`
+        //    resolved to '' for every inbound message in this format and the
+        //    message was silently skipped ("nothing to store") even though
+        //    the webhook itself was firing correctly.
+        const firstMsg     = Array.isArray(entry.messages) ? entry.messages[0] : null;
+        const firstContact = Array.isArray(entry.contacts) ? entry.contacts[0] : null;
         const from        = entry.customerNumber  || entry.customer_number  || entry.from
+                         || entry.sender
+                         || (firstMsg && firstMsg.from)
+                         || (firstContact && firstContact.wa_id)
                          || (entry.contact && entry.contact.wa_id) || '';
         const toNumber    = entry.integratedNumber || entry.integrated_number || entry.to || '';
         const requestId   = entry.uuid || entry.request_id || entry.requestId
                          || entry.msg_id || entry.message_id || entry.message_uuid || '';
         const statusValue = entry.status || entry.reason || '';
-        const contactName = entry.customerName || entry.customer_name || '';
-        const direction   = entry.direction || '';
+        const contactName = entry.customerName || entry.customer_name
+                         || (firstContact && firstContact.profile && firstContact.profile.name) || '';
+        // MSG91's newer format sends direction as a NUMBER (0 = inbound), not
+        // a string — `entry.direction || ''` would turn 0 into '' anyway
+        // (both falsy), which happens to still work for the inbound path
+        // below, but keep the raw value visible for logging/debugging rather
+        // than silently coercing it.
+        const direction   = (typeof entry.direction === 'string' ? entry.direction : '') || '';
 
         // contentType from MSG91: "text", "image", "document", "audio", "video",
         // "inbound", "incoming" — strip direction prefix so "inbound/text" → "text"
