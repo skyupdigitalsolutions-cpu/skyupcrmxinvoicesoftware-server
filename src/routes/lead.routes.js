@@ -4,6 +4,7 @@ import {
     listLeads,
     getLead,
     createLead,
+    bulkCreateLeads,
     updateLead,
     setLeadStatus,
     logCall,
@@ -33,6 +34,10 @@ router.get('/deleted/report', authorize('admin'), listDeletedContacts);
 // Two-segment paths, declared before /:id so they aren't caught by the param route.
 router.get('/duplicates', authorize('admin'), listDuplicateLeads);
 router.post('/merge', authorize('admin'), mergeLeads);
+
+// ── Bulk CSV import (one request for up to 2000 leads) ───────────────────────
+// Declared before /:id routes.
+router.post('/bulk', bulkCreateLeads);
 
 // ── CRUD ──────────────────────────────────────────────────────────────────────
 router.get('/', listLeads);
