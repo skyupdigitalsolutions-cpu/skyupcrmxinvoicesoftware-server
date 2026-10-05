@@ -1,6 +1,6 @@
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { ApiError } from '../utils/ApiError.js';
-import { Lead, normalizePhone } from '../models/Lead.js';
+import { Lead, normalizePhone, LEAD_SOURCES, LEAD_STATUSES } from '../models/Lead.js';
 import { phoneSearchCandidates } from '../utils/phone.js';
 import { DeletedContact } from '../models/DeletedContact.js';
 import { Counter } from '../models/Counter.js';
@@ -271,6 +271,115 @@ export const createLead = asyncHandler(async(req, res) => {
     }
 
     res.status(201).json({ success: true, lead });
+});
+
+// ── Bulk import (POST /leads/bulk) ────────────────────────────────────────────
+// Used by the Leads page "Import CSV". One request carries up to
+// BULK_MAX leads, so a 1000–2000 row file no longer burns one API call per row
+// (which used to hit the 300-requests / 15-min rate limit).
+const BULK_MAX = 2000;
+
+export const bulkCreateLeads = asyncHandler(async (req, res) => {
+    const rows = Array.isArray(req.body?.leads) ? req.body.leads : [];
+    if (!rows.length) throw new ApiError(400, 'No leads supplied');
+    if (rows.length > BULK_MAX) {
+        throw new ApiError(400,
+            `Import limit exceeded: a single import can contain at most ${BULK_MAX} leads, but this file has ${rows.length}. Split it into smaller files.`,
+            { importLimitExceeded: true, max: BULK_MAX, requested: rows.length });
+    }
+
+    const companyId = tenantCompanyId(req);
+    const company = await Company.findById(companyId);
+    if (!company) throw new ApiError(404, 'Company not found');
+
+
+    // Pre-load existing phone keys for this company (one query, not one per row)
+    const keysInFile = rows
+        .map((r) => normalizePhone(r?.mobile, r?.country || 'UAE'))
+        .filter(Boolean);
+    const existing = keysInFile.length
+        ? await Lead.find({ company: companyId, mobileKey: { $in: keysInFile } }, { mobileKey: 1 }).lean()
+        : [];
+    const existingKeys = new Set(existing.map((l) => l.mobileKey));
+    const seen = new Set();
+
+    const docs = [];
+    const docRow = [];      // docs[i] came from CSV row docRow[i]
+    const errors = [];
+    let skipped = 0;
+    const str = (v) => (v == null ? '' : String(v).trim());
+
+    rows.forEach((r, i) => {
+        const rowNo = i + 1; // position in this request (client maps it to the file)
+        const name = str(r?.name);
+        const city = str(r?.city);
+        if (!name) return errors.push(`Row ${rowNo}: name is required`);
+        if (!city) return errors.push(`Row ${rowNo}: city is required`);
+
+        const country = str(r.country) || 'UAE';
+        const mobile = str(r.mobile);
+        const mobileKey = normalizePhone(mobile, country);
+        if (mobileKey && (existingKeys.has(mobileKey) || seen.has(mobileKey))) { skipped++; return; }
+
+        const doc = new Lead({
+            company: companyId,
+            name, mobile, country, city,
+            altCountry: country,
+            email: str(r.email),
+            source: LEAD_SOURCES.includes(r.source) ? r.source : 'Other',
+            campaign: str(r.campaign),
+            interest: str(r.interest),
+            remark: str(r.remark),
+            delivery: str(r.delivery),
+            status: LEAD_STATUSES.includes(r.status) ? r.status : 'New',
+            owner: req.user._id,
+            ownerName: req.user.name,
+            mobileKey, // insertMany does NOT run pre('save'), so set the dedup key here
+        });
+        const vErr = doc.validateSync();
+        if (vErr) return errors.push(`Row ${rowNo} (${name}): ${Object.values(vErr.errors).map((e) => e.message).join(', ')}`);
+
+        if (mobileKey) seen.add(mobileKey);
+        docs.push(doc);
+        docRow.push(rowNo);
+    });
+
+    // Company lead limit (0 = unlimited). Checked against the NEW leads only
+    // (duplicates/invalid rows already removed). All-or-nothing: if the file
+    // would go over the limit, nothing is imported and the exact numbers are
+    // returned so the user knows how many rows to remove.
+    const leadLimit = (company.limits && company.limits.maxLeads) ? company.limits.maxLeads : 0;
+    if (leadLimit > 0 && docs.length) {
+        const current = await Lead.countDocuments({ company: companyId });
+        const available = Math.max(0, leadLimit - current);
+        if (docs.length > available) {
+            throw new ApiError(403,
+                available === 0
+                    ? `Lead limit exceeded: your company's limit is ${leadLimit} leads and you already have ${current}. No more leads can be added — contact your administrator to increase the limit.`
+                    : `Lead limit exceeded: your company's limit is ${leadLimit} leads and you already have ${current}, so only ${available} more can be added. This file has ${docs.length} new leads — remove ${docs.length - available} rows and try again.`,
+                { limitExceeded: true, limit: leadLimit, current, available, requested: docs.length }
+            );
+        }
+    }
+
+    let created = docs.length;
+    if (docs.length) {
+        try {
+            // ordered:false → one bad row doesn't stop the rest
+            await Lead.insertMany(docs, { ordered: false });
+        } catch (err) {
+            const writeErrors = err.writeErrors || (err.writeError ? [err.writeError] : []);
+            if (!writeErrors.length) throw err;
+            created = docs.length - writeErrors.length;
+            for (const we of writeErrors) {
+                const rowNo = docRow[we.index ?? we.err?.index] ?? '?';
+                if ((we.code ?? we.err?.code) === 11000) skipped++; // raced duplicate
+                else errors.push(`Row ${rowNo}: ${we.errmsg || we.err?.errmsg || 'insert failed'}`);
+            }
+        }
+    }
+
+    res.status(201).json({ success: true, created, skipped, failed: errors.length, errors });
 });
 
 // ── Update core fields (owner or admin only) ──────────────────────────────────
