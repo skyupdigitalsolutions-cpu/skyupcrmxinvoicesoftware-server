@@ -167,8 +167,7 @@ export const createLead = asyncHandler(async(req, res) => {
 
     if (!name || !name.trim()) throw new ApiError(400, 'Lead name is required');
 
-    // City is mandatory: city-wise reporting for outdoor sales depends on it.
-    if (!city || !String(city).trim()) throw new ApiError(400, 'City is required');
+    // City is optional (blank is stored as '').
 
     // Resolve the target company up front (not just req.user.company, which
     // is empty for the developer role) so the duplicate guard checks the
@@ -314,7 +313,6 @@ export const bulkCreateLeads = asyncHandler(async (req, res) => {
         const name = str(r?.name);
         const city = str(r?.city);
         if (!name) return errors.push(`Row ${rowNo}: name is required`);
-        if (!city) return errors.push(`Row ${rowNo}: city is required`);
 
         const country = str(r.country) || 'UAE';
         const mobile = str(r.mobile);
