@@ -11,5 +11,5 @@ router.post('/refresh',                                                      ref
 router.post('/logout',         protect,                                      logout);
 router.get('/me',              protect,                                      me);
 router.post('/forgot-password', authLimiter, validate(forgotPasswordSchema), forgotPassword);
-router.post('/reset-password',              validate(resetPasswordSchema),   resetPassword);
+router.post('/reset-password', authLimiter, validate(resetPasswordSchema),   resetPassword);
 export default router;

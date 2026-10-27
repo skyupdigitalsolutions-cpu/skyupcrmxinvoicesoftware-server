@@ -1,12 +1,16 @@
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { ApiError } from '../utils/ApiError.js';
-import { Lead, normalizePhone } from '../models/Lead.js';
+import { Lead, normalizePhone, LEAD_SOURCES, LEAD_STATUSES } from '../models/Lead.js';
+import { phoneSearchCandidates } from '../utils/phone.js';
 import { DeletedContact } from '../models/DeletedContact.js';
 import { Counter } from '../models/Counter.js';
 import { Order } from '../models/Order.js';
 import { Company } from '../models/Company.js';
 import { tenantScope, tenantCompanyId } from '../middleware/auth.js';
 import { notifyUsers, adminsOf } from '../utils/notify.js';
+import { Cheque } from '../models/Cheque.js';
+import { WhatsAppMessage } from '../models/WhatsAppMessage.js';
+import { Notification } from '../models/Notification.js';
 
 // Human-readable labels for the fields we track edits on — used both in the
 // stored history and the admin notification text.
@@ -54,9 +58,25 @@ export const lookupByPhone = asyncHandler(async(req, res) => {
         return res.json({ success: true, exists: false });
     }
 
-    const lead = await Lead.findOne({ mobileKey: key, ...tenantScope(req) }).select(
+    // Primary lookup: exact mobileKey (correct country code prepended).
+    let lead = await Lead.findOne({ mobileKey: key, ...tenantScope(req) }).select(
         'name mobile country city status interest remark delivery callLogs notes owner ownerName converted orderNo createdAt'
     );
+
+    // Fallback: if not found by exact key, search by raw digit suffix.
+    // This catches existing leads whose mobileKey was computed with the wrong
+    // dial code (e.g. '971' UAE fallback instead of the correct country code)
+    // due to the case-sensitivity bug that has now been fixed. Without this,
+    // those leads would never match and would keep generating duplicates.
+    if (!lead) {
+        const rawDigits = mobile.replace(/\D/g, '');
+        if (rawDigits.length >= 6) {
+            const suffixRegex = new RegExp(rawDigits.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$');
+            lead = await Lead.findOne({ mobileKey: suffixRegex, ...tenantScope(req) }).select(
+                'name mobile country city status interest remark delivery callLogs notes owner ownerName converted orderNo createdAt'
+            );
+        }
+    }
 
     if (!lead) return res.json({ success: true, exists: false });
 
@@ -97,9 +117,23 @@ export const listLeads = asyncHandler(async(req, res) => {
     if (search) {
         const rx = new RegExp(String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
         q.$or = [{ name: rx }, { mobile: rx }, { email: rx }, { city: rx }];
+        // Phone-aware search: matches regardless of whether the typed number
+        // includes the country code, a leading trunk zero, or any punctuation
+        // — see phoneSearchCandidates for why this needs its own handling.
+        const phone = phoneSearchCandidates(search);
+        if (phone) q.$or.push({ mobileKey: phone.mobileKeyRegex });
     }
 
-    const leads = await Lead.find(q).sort({ createdAt: -1 }).limit(500);
+    // Support ?fields=_id,name,mobile,... for lean projections (e.g. blast modal).
+    // When fields param is present, return plain objects — no toObject/toSafeJSON overhead.
+    const { fields } = req.query;
+    if (fields) {
+        const projection = fields.split(',').reduce((acc, f) => { acc[f.trim()] = 1; return acc; }, {});
+        const leanLeads = await Lead.find(q).select(projection).sort({ createdAt: -1 }).lean();
+        return res.json({ success: true, leads: leanLeads });
+    }
+
+    const leads = await Lead.find(q).sort({ createdAt: -1 });
 
     // Edit history is admin-only — strip it out for sales users' own view.
     const out = req.user.role === 'admin' ?
@@ -133,27 +167,39 @@ export const createLead = asyncHandler(async(req, res) => {
 
     if (!name || !name.trim()) throw new ApiError(400, 'Lead name is required');
 
-    // City is mandatory: city-wise reporting for outdoor sales depends on it.
-    if (!city || !String(city).trim()) throw new ApiError(400, 'City is required');
+    // City is optional (blank is stored as '').
+
+    // Resolve the target company up front (not just req.user.company, which
+    // is empty for the developer role) so the duplicate guard checks the
+    // SAME company the lead will actually be created in.
+    const companyId = tenantCompanyId(req);
 
     // Duplicate phone guard
     if (mobile && mobile.trim()) {
         const key = normalizePhone(mobile, country);
-        if (key) {
-            const existing = await Lead.findOne({ mobileKey: key, company: req.user.company });
-            if (existing) {
-                const ownedByMe = String(existing.owner) === String(req.user._id);
-                return res.status(409).json({
-                    success: false,
-                    message: 'A lead with this phone number already exists.',
-                    details: {
-                        duplicate: true,
-                        leadId: existing._id,
-                        ownedByMe,
-                        ownerName: existing.ownerName,
-                    },
-                });
+        // Primary check: exact mobileKey match.
+        let existing = key ? await Lead.findOne({ mobileKey: key, company: companyId }) : null;
+        // Fallback: raw digit suffix match — catches leads stored with a wrong
+        // dial code (from the now-fixed case-sensitivity bug in normalizePhone).
+        if (!existing) {
+            const rawDigits = String(mobile).replace(/\D/g, '');
+            if (rawDigits.length >= 6) {
+                const suffixRegex = new RegExp(rawDigits.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$');
+                existing = await Lead.findOne({ mobileKey: suffixRegex, company: companyId });
             }
+        }
+        if (existing) {
+            const ownedByMe = String(existing.owner) === String(req.user._id);
+            return res.status(409).json({
+                success: false,
+                message: 'A lead with this phone number already exists.',
+                details: {
+                    duplicate: true,
+                    leadId: existing._id,
+                    ownedByMe,
+                    ownerName: existing.ownerName,
+                },
+            });
         }
     }
 
@@ -170,7 +216,6 @@ export const createLead = asyncHandler(async(req, res) => {
     }
 
     // Enforce the company's lead limit (0 = unlimited).
-    const companyId = tenantCompanyId(req);
     const company = await Company.findById(companyId);
     if (!company) throw new ApiError(404, 'Company not found');
     const leadLimit = (company.limits && company.limits.maxLeads) ? company.limits.maxLeads : 0;
@@ -181,29 +226,169 @@ export const createLead = asyncHandler(async(req, res) => {
         }
     }
 
-    const lead = await Lead.create({
-        company: companyId,
-        name,
-        mobile,
-        altMobile,
-        altCountry: altCountry || country,
-        country,
-        city,
-        email,
-        source,
-        campaign,
-        interest,
-        remark,
-        delivery,
-        status: status || 'New',
-        owner: ownerId,
-        ownerName,
-    });
+    let lead;
+    try {
+        lead = await Lead.create({
+            company: companyId,
+            name,
+            mobile,
+            altMobile,
+            altCountry: altCountry || country,
+            country,
+            city,
+            email,
+            source,
+            campaign,
+            interest,
+            remark,
+            delivery,
+            status: status || 'New',
+            owner: ownerId,
+            ownerName,
+        });
+    } catch (err) {
+        // The unique (company, mobileKey) index is the real guarantee against
+        // duplicates — it can reject an insert here even if the pre-check
+        // above raced with another near-simultaneous request. Converted to
+        // the same friendly duplicate response as the pre-check, rather than
+        // a raw 500, so the caller (e.g. the Order Form) handles it identically.
+        if (err && err.code === 11000) {
+            const key = normalizePhone(mobile, country);
+            const existing = key ? await Lead.findOne({ mobileKey: key, company: companyId }) : null;
+            return res.status(409).json({
+                success: false,
+                message: 'A lead with this phone number already exists.',
+                details: {
+                    duplicate: true,
+                    leadId: existing ? existing._id : null,
+                    ownedByMe: existing ? String(existing.owner) === String(req.user._id) : false,
+                    ownerName: existing ? existing.ownerName : '',
+                },
+            });
+        }
+        throw err;
+    }
 
     res.status(201).json({ success: true, lead });
 });
 
+// ── Bulk import (POST /leads/bulk) ────────────────────────────────────────────
+// Used by the Leads page "Import CSV". One request carries up to
+// BULK_MAX leads, so a 1000–2000 row file no longer burns one API call per row
+// (which used to hit the 300-requests / 15-min rate limit).
+const BULK_MAX = 2000;
+
+export const bulkCreateLeads = asyncHandler(async (req, res) => {
+    const rows = Array.isArray(req.body?.leads) ? req.body.leads : [];
+    if (!rows.length) throw new ApiError(400, 'No leads supplied');
+    if (rows.length > BULK_MAX) {
+        throw new ApiError(400,
+            `Import limit exceeded: a single import can contain at most ${BULK_MAX} leads, but this file has ${rows.length}. Split it into smaller files.`,
+            { importLimitExceeded: true, max: BULK_MAX, requested: rows.length });
+    }
+
+    const companyId = tenantCompanyId(req);
+    const company = await Company.findById(companyId);
+    if (!company) throw new ApiError(404, 'Company not found');
+
+
+    // Pre-load existing phone keys for this company (one query, not one per row)
+    const keysInFile = rows
+        .map((r) => normalizePhone(r?.mobile, r?.country || 'UAE'))
+        .filter(Boolean);
+    const existing = keysInFile.length
+        ? await Lead.find({ company: companyId, mobileKey: { $in: keysInFile } }, { mobileKey: 1 }).lean()
+        : [];
+    const existingKeys = new Set(existing.map((l) => l.mobileKey));
+    const seen = new Set();
+
+    const docs = [];
+    const docRow = [];      // docs[i] came from CSV row docRow[i]
+    const errors = [];
+    let skipped = 0;
+    const str = (v) => (v == null ? '' : String(v).trim());
+
+    rows.forEach((r, i) => {
+        const rowNo = i + 1; // position in this request (client maps it to the file)
+        const name = str(r?.name);
+        const city = str(r?.city);
+        if (!name) return errors.push(`Row ${rowNo}: name is required`);
+
+        const country = str(r.country) || 'UAE';
+        const mobile = str(r.mobile);
+        const mobileKey = normalizePhone(mobile, country);
+        if (mobileKey && (existingKeys.has(mobileKey) || seen.has(mobileKey))) { skipped++; return; }
+
+        const doc = new Lead({
+            company: companyId,
+            name, mobile, country, city,
+            altCountry: country,
+            email: str(r.email),
+            source: LEAD_SOURCES.includes(r.source) ? r.source : 'Other',
+            campaign: str(r.campaign),
+            interest: str(r.interest),
+            remark: str(r.remark),
+            delivery: str(r.delivery),
+            status: LEAD_STATUSES.includes(r.status) ? r.status : 'New',
+            owner: req.user._id,
+            ownerName: req.user.name,
+            mobileKey, // insertMany does NOT run pre('save'), so set the dedup key here
+        });
+        const vErr = doc.validateSync();
+        if (vErr) return errors.push(`Row ${rowNo} (${name}): ${Object.values(vErr.errors).map((e) => e.message).join(', ')}`);
+
+        if (mobileKey) seen.add(mobileKey);
+        docs.push(doc);
+        docRow.push(rowNo);
+    });
+
+    // Company lead limit (0 = unlimited). Checked against the NEW leads only
+    // (duplicates/invalid rows already removed). All-or-nothing: if the file
+    // would go over the limit, nothing is imported and the exact numbers are
+    // returned so the user knows how many rows to remove.
+    const leadLimit = (company.limits && company.limits.maxLeads) ? company.limits.maxLeads : 0;
+    if (leadLimit > 0 && docs.length) {
+        const current = await Lead.countDocuments({ company: companyId });
+        const available = Math.max(0, leadLimit - current);
+        if (docs.length > available) {
+            throw new ApiError(403,
+                available === 0
+                    ? `Lead limit exceeded: your company's limit is ${leadLimit} leads and you already have ${current}. No more leads can be added — contact your administrator to increase the limit.`
+                    : `Lead limit exceeded: your company's limit is ${leadLimit} leads and you already have ${current}, so only ${available} more can be added. This file has ${docs.length} new leads — remove ${docs.length - available} rows and try again.`,
+                { limitExceeded: true, limit: leadLimit, current, available, requested: docs.length }
+            );
+        }
+    }
+
+    let created = docs.length;
+    if (docs.length) {
+        try {
+            // ordered:false → one bad row doesn't stop the rest
+            await Lead.insertMany(docs, { ordered: false });
+        } catch (err) {
+            const writeErrors = err.writeErrors || (err.writeError ? [err.writeError] : []);
+            if (!writeErrors.length) throw err;
+            created = docs.length - writeErrors.length;
+            for (const we of writeErrors) {
+                const rowNo = docRow[we.index ?? we.err?.index] ?? '?';
+                if ((we.code ?? we.err?.code) === 11000) skipped++; // raced duplicate
+                else errors.push(`Row ${rowNo}: ${we.errmsg || we.err?.errmsg || 'insert failed'}`);
+            }
+        }
+    }
+
+    res.status(201).json({ success: true, created, skipped, failed: errors.length, errors });
+});
+
 // ── Update core fields (owner or admin only) ──────────────────────────────────
+// NOTE: `mobile` / `country` are deliberately NOT in the editable fields below.
+// A lead's phone number is immutable once created — enforced in the UI (the
+// Mobile input is read-only on edit) and mirrored here so the same rule holds
+// for any direct API call too. This is what keeps the company-wide "one lead
+// per phone number" guarantee airtight: the only way a mobileKey is ever set
+// is at createLead time, where it's guarded by both a pre-check and the
+// unique (company, mobileKey) index. If the number is genuinely wrong, use
+// deleteLead + createLead (or mergeLeads) instead of changing it in place.
 export const updateLead = asyncHandler(async(req, res) => {
     const lead = await Lead.findOne({ _id: req.params.id, ...tenantScope(req) });
     if (!lead) throw new ApiError(404, 'Lead not found');
@@ -213,13 +398,40 @@ export const updateLead = asyncHandler(async(req, res) => {
         throw new ApiError(403, 'Only the lead owner or an admin can edit core details');
     }
 
-    const fields = ['name', 'mobile', 'altMobile', 'altCountry', 'country', 'city', 'email', 'source', 'campaign', 'interest', 'remark', 'delivery', 'status', 'followUpAt'];
+    const fields = ['name', 'country', 'altMobile', 'altCountry', 'city', 'email', 'source', 'campaign', 'interest', 'remark', 'delivery', 'status', 'followUpAt'];
 
     // Capture the diff BEFORE applying changes, so the history/notification
     // reflect exactly what this save actually changed.
     const changes = diffFields(lead, req.body, fields);
 
     fields.forEach((f) => { if (req.body[f] !== undefined) lead[f] = req.body[f]; });
+
+    // Admin can update mobile number and/or country.
+    // Recalculate mobileKey whenever either mobile or country changes.
+    const mobileChanged = req.user.role === 'admin' && req.body.mobile !== undefined && String(req.body.mobile).trim() !== lead.mobile;
+    const countryChanged = req.body.country !== undefined && req.body.country !== lead.country;
+
+    if (req.user.role === 'admin' && (mobileChanged || countryChanged)) {
+        const newMobile = mobileChanged ? String(req.body.mobile).trim() : lead.mobile;
+        const newCountry = lead.country; // already updated above by fields.forEach
+        const newKey = normalizePhone(newMobile, newCountry);
+        if (newKey) {
+            // Check no other lead in this company has the same mobileKey.
+            const duplicate = await Lead.findOne({
+                mobileKey: newKey,
+                company: lead.company,
+                _id: { $ne: lead._id },
+            });
+            if (duplicate) {
+                throw new ApiError(409, `This mobile number is already assigned to lead "${duplicate.name}".`);
+            }
+            lead.mobileKey = newKey;
+        }
+        if (mobileChanged) {
+            changes.push({ field: 'mobile', from: lead.mobile, to: newMobile });
+            lead.mobile = newMobile;
+        }
+    }
 
     // Admin can re-assign owner
     if (req.user.role === 'admin' && req.body.owner) {
@@ -337,6 +549,32 @@ export const addNote = asyncHandler(async(req, res) => {
 });
 
 // ── Convert lead → Order ──────────────────────────────────────────────────────
+
+// ── Mark lead as Buyer (Won) from Order Form ─────────────────────────────────
+// Lightweight alternative to convertLead — used when an order is already
+// created via the Order Form. Just marks the lead Won + sets orderNo without
+// creating a duplicate order.
+export const markLeadBuyer = asyncHandler(async(req, res) => {
+    const lead = await Lead.findOne({ _id: req.params.id, ...tenantScope(req) });
+    if (!lead) throw new ApiError(404, 'Lead not found');
+    if (lead.converted) return res.json({ success: true, lead }); // already converted, no-op
+
+    const { orderNo } = req.body;
+
+    lead.converted = true;
+    lead.status    = 'Won';
+    if (orderNo) lead.orderNo = orderNo;
+    lead.editHistory.push({
+        by: req.user._id,
+        byName: req.user.name,
+        at: new Date(),
+        changes: [{ field: 'status', from: lead.status, to: 'Won' }],
+    });
+    await lead.save();
+
+    res.json({ success: true, lead });
+});
+
 export const convertLead = asyncHandler(async(req, res) => {
     const lead = await Lead.findOne({ _id: req.params.id, ...tenantScope(req) });
     if (!lead) throw new ApiError(404, 'Lead not found');
@@ -379,7 +617,146 @@ export const convertLead = asyncHandler(async(req, res) => {
     res.json({ success: true, lead, order });
 });
 
-// ── Delete lead (admin only) ──────────────────────────────────────────────────
+// ── Duplicate leads: find & merge (admin only) ───────────────────────────────
+// Groups existing leads that share the same normalised phone number
+// (mobileKey) within the company — this is for cleaning up leads that were
+// already duplicated before the create-time guard existed/applied, or from
+// any other historical gap. Empty/blank mobileKey is excluded so leads with
+// no phone number never get grouped together.
+export const listDuplicateLeads = asyncHandler(async(req, res) => {
+    const companyId = tenantCompanyId(req);
+
+    const groups = await Lead.aggregate([
+        { $match: { company: companyId, mobileKey: { $ne: '' } } },
+        { $group: { _id: '$mobileKey', ids: { $push: '$_id' }, count: { $sum: 1 } } },
+        { $match: { count: { $gt: 1 } } },
+    ]);
+
+    if (!groups.length) return res.json({ success: true, groups: [] });
+
+    const allIds = groups.flatMap((g) => g.ids);
+    const leads = await Lead.find({ _id: { $in: allIds } })
+        .select('name mobile country city status owner ownerName converted orderNo createdAt callLogs notes mobileKey')
+        .lean();
+    const byId = new Map(leads.map((l) => [String(l._id), l]));
+
+    const out = groups.map((g) => ({
+        mobileKey: g._id,
+        leads: g.ids
+            .map((id) => byId.get(String(id)))
+            .filter(Boolean)
+            .map((l) => ({
+                id: l._id,
+                name: l.name,
+                mobile: l.mobile,
+                country: l.country,
+                city: l.city,
+                status: l.status,
+                owner: l.owner,
+                ownerName: l.ownerName,
+                converted: l.converted,
+                orderNo: l.orderNo,
+                callLogCount: (l.callLogs || []).length,
+                noteCount: (l.notes || []).length,
+                createdAt: l.createdAt,
+            }))
+            .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt)),
+    }));
+
+    res.json({ success: true, groups: out });
+});
+
+// Merges one or more duplicate leads into a single "keep" lead: combines call
+// logs, notes, and edit history; reassigns any Cheque / WhatsAppMessage /
+// Notification records pointing at a merged-away lead; archives each merged
+// lead to DeletedContact (same append-only archive used for outright
+// deletion); then removes the merged-away lead documents. Never touches
+// Orders/Invoices — they store a snapshot (name/mobile), not a lead reference.
+export const mergeLeads = asyncHandler(async(req, res) => {
+    const { keepId, mergeIds } = req.body || {};
+    if (!keepId || !Array.isArray(mergeIds) || !mergeIds.length) {
+        throw new ApiError(400, 'keepId and at least one mergeIds entry are required.');
+    }
+    if (mergeIds.includes(keepId)) {
+        throw new ApiError(400, 'keepId cannot also appear in mergeIds.');
+    }
+
+    const scope = tenantScope(req);
+    const keepLead = await Lead.findOne({ _id: keepId, ...scope });
+    if (!keepLead) throw new ApiError(404, 'The lead to keep was not found.');
+
+    const duplicates = await Lead.find({ _id: { $in: mergeIds }, ...scope });
+    if (!duplicates.length) throw new ApiError(404, 'None of the selected duplicate leads were found.');
+
+    let mergedCallLogs = 0;
+    let mergedNotes = 0;
+
+    for (const dup of duplicates) {
+        // Combine discussion history into the kept lead.
+        if (dup.callLogs && dup.callLogs.length) {
+            keepLead.callLogs.push(...dup.callLogs);
+            mergedCallLogs += dup.callLogs.length;
+        }
+        if (dup.notes && dup.notes.length) {
+            keepLead.notes.push(...dup.notes);
+            mergedNotes += dup.notes.length;
+        }
+        if (dup.editHistory && dup.editHistory.length) {
+            // Filter out any entries with null 'by' (from auto-advances on unowned leads)
+            keepLead.editHistory.push(...dup.editHistory.filter(e => e.by));
+        }
+        // Record the merge itself as an edit-history entry for oversight.
+        keepLead.editHistory.push({
+            by: req.user._id,
+            byName: req.user.name,
+            changes: [{ field: 'merged', from: null, to: `Merged duplicate lead "${dup.name}" (${dup._id}) into this one` }],
+        });
+
+        // Reassign anything pointing at the duplicate lead over to the kept one.
+        await Promise.all([
+            Cheque.updateMany({ lead: dup._id }, { $set: { lead: keepLead._id } }),
+            WhatsAppMessage.updateMany({ lead: dup._id }, { $set: { lead: keepLead._id } }),
+            Notification.updateMany({ lead: dup._id }, { $set: { lead: keepLead._id } }),
+        ]);
+
+        // Archive the duplicate the same way an outright delete does, so its
+        // phone number stays visible in the Deleted Contacts report.
+        try {
+            await DeletedContact.create({
+                company: dup.company,
+                name: dup.name || '',
+                mobile: dup.mobile || '',
+                mobileKey: dup.mobileKey || '',
+                email: dup.email || '',
+                country: dup.country || '',
+                city: dup.city || '',
+                source: dup.source || '',
+                status: dup.status || '',
+                interest: dup.interest || '',
+                ownerName: dup.ownerName || '',
+                originalLeadId: dup._id,
+                deletedBy: req.user._id,
+                deletedByName: req.user.name || '',
+                leadCreatedAt: dup.createdAt || null,
+            });
+        } catch (err) {
+            console.error('[lead] failed to archive merged-away lead:', err.message);
+        }
+    }
+
+    await keepLead.save();
+    await Lead.deleteMany({ _id: { $in: duplicates.map((d) => d._id) } });
+
+    res.json({
+        success: true,
+        message: `Merged ${duplicates.length} duplicate lead(s) into "${keepLead.name}".`,
+        lead: keepLead,
+        mergedCallLogs,
+        mergedNotes,
+    });
+});
+
+
 // The lead's contact number is preserved in the append-only DeletedContact
 // archive first, so it stays available in the "Deleted Contacts" report even
 // after the lead itself is removed.
@@ -424,7 +801,13 @@ export const listDeletedContacts = asyncHandler(async(req, res) => {
     if (search) {
         const rx = new RegExp(String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
         q.$or = [{ name: rx }, { mobile: rx }, { city: rx }, { email: rx }];
+        const phone = phoneSearchCandidates(search);
+        if (phone) q.$or.push({ mobileKey: phone.mobileKeyRegex });
     }
+
+    // Exclude entries deleted by internal repair scripts — these are
+    // deduplication artefacts, not genuine user deletions, and clutter the report.
+    q.deletedByName = { $not: /^Repair script/ };
 
     const contacts = await DeletedContact.find(q).sort({ createdAt: -1 }).limit(1000).lean();
     res.json({ success: true, contacts });

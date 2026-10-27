@@ -1,9 +1,11 @@
 import { Router } from 'express';
 import {
+    markLeadBuyer,
     lookupByPhone,
     listLeads,
     getLead,
     createLead,
+    bulkCreateLeads,
     updateLead,
     setLeadStatus,
     logCall,
@@ -11,6 +13,8 @@ import {
     convertLead,
     deleteLead,
     listDeletedContacts,
+    listDuplicateLeads,
+    mergeLeads,
 } from '../controllers/lead.controller.js';
 import { protect, authorize } from '../middleware/auth.js';
 
@@ -27,6 +31,15 @@ router.get('/lookup', lookupByPhone);
 // Two-segment path, declared before /:id so it isn't caught by the param route.
 router.get('/deleted/report', authorize('admin'), listDeletedContacts);
 
+// ── Duplicate leads: find & merge (admin only) ───────────────────────────────
+// Two-segment paths, declared before /:id so they aren't caught by the param route.
+router.get('/duplicates', authorize('admin'), listDuplicateLeads);
+router.post('/merge', authorize('admin'), mergeLeads);
+
+// ── Bulk CSV import (one request for up to 2000 leads) ───────────────────────
+// Declared before /:id routes.
+router.post('/bulk', bulkCreateLeads);
+
 // ── CRUD ──────────────────────────────────────────────────────────────────────
 router.get('/', listLeads);
 router.post('/', createLead);
@@ -42,6 +55,7 @@ router.post('/:id/note', addNote);
 
 // ── Convert to order (owner / admin) ─────────────────────────────────────────
 router.post('/:id/convert', convertLead);
+router.post('/:id/mark-buyer', markLeadBuyer);
 
 // ── Delete (admin only) ───────────────────────────────────────────────────────
 router.delete('/:id', authorize('admin'), deleteLead);

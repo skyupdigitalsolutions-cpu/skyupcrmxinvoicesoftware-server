@@ -4,6 +4,7 @@ import mongoose from 'mongoose';
 // of Order/Invoice — created directly on the Cheque Calendar page ("Add
 // Cheque"), not derived from an order's payment term.
 const CHEQUE_STATUSES = ['Pending', 'Collected', 'Bounced'];
+const CHEQUE_TYPES = ['Receivable', 'Payable'];
 
 const chequeSchema = new mongoose.Schema(
   {
@@ -14,6 +15,9 @@ const chequeSchema = new mongoose.Schema(
     // source of truth shown on the calendar even if the lead is later edited
     // or removed.
     lead: { type: mongoose.Schema.Types.ObjectId, ref: 'Lead', default: null },
+
+    // Receivable = money coming IN from a client; Payable = money going OUT to a supplier.
+    type: { type: String, enum: CHEQUE_TYPES, default: 'Receivable', index: true },
 
     customer: { type: String, required: true, trim: true },
     mobile:   { type: String, default: '', trim: true },
@@ -47,6 +51,7 @@ chequeSchema.methods.toSafeJSON = function () {
   return {
     id: this._id,
     lead: this.lead || null,
+    type: this.type || 'Receivable',
     customer: this.customer,
     mobile: this.mobile,
     country: this.country,
@@ -62,5 +67,5 @@ chequeSchema.methods.toSafeJSON = function () {
   };
 };
 
-export { CHEQUE_STATUSES };
+export { CHEQUE_STATUSES, CHEQUE_TYPES };
 export const Cheque = mongoose.model('Cheque', chequeSchema);

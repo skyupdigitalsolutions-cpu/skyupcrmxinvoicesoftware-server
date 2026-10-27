@@ -8,6 +8,7 @@ import { Counter } from '../models/Counter.js';
 import { generateInvoicePdf } from '../utils/invoicePdf.js';
 import { uploadPdfToCloudinary, deletePdfFromCloudinary } from '../utils/cloudinary.js';
 import { tenantScope, tenantCompanyId } from '../middleware/auth.js';
+import { phoneSearchCandidates } from '../utils/phone.js';
 
 // Sales users only ever touch invoices they created; admin/developer see the
 // whole tenant. Applied to reads AND mutations so a salesperson can neither
@@ -16,6 +17,11 @@ const scopeFor = (req) => {
     const t = tenantScope(req);
     return req.user.role === 'sales' ? {...t, createdBy: req.user._id } : t;
 };
+
+// Read scope: EVERY authenticated user in the tenant can view (and download)
+// all invoices, regardless of who created them. Edits (items/payment status/
+// regenerate PDF) stay restricted to the creator via scopeFor() above.
+const readScopeFor = (req) => tenantScope(req);
 
 // Load the tenant company (branding + currency + Cloudinary secret) for an
 // invoice. apiSecret is select:false, so it must be requested explicitly or
@@ -73,19 +79,23 @@ async function attachPdf(inv, company = undefined) {
 
 export const listInvoices = asyncHandler(async(req, res) => {
     const { search, paymentStatus } = req.query;
-    const q = {...scopeFor(req) };
+    const q = {...readScopeFor(req) };
     if (paymentStatus) q.paymentStatus = paymentStatus;
     if (search) {
         const rx = new RegExp(String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
         q.$or = [{ customer: rx }];
         if (/^\d+$/.test(search)) q.$or.push({ invoiceNo: Number(search) }, { orderNo: Number(search) });
+        // Phone-aware search: Invoice has no normalised mobileKey, so match
+        // the free-text mobile field tolerant of country code, leading
+        // zero, and punctuation differences.
+        const phone = phoneSearchCandidates(search);
+        if (phone) phone.rawFieldRegexes.forEach((r) => q.$or.push({ mobile: r }));
     }
-    const invoices = await Invoice.find(q).sort({ createdAt: -1 }).limit(500);
-    res.json({ success: true, invoices });
+    const invoices = await Invoice.find(q).sort({ createdAt: -1 });    res.json({ success: true, invoices });
 });
 
 export const getInvoice = asyncHandler(async(req, res) => {
-    const inv = await Invoice.findOne({ _id: req.params.id, ...scopeFor(req) });
+    const inv = await Invoice.findOne({ _id: req.params.id, ...readScopeFor(req) });
     if (!inv) throw new ApiError(404, 'Invoice not found');
     res.json({ success: true, invoice: inv });
 });
@@ -96,7 +106,7 @@ export const getInvoice = asyncHandler(async(req, res) => {
 // filename — the raw Cloudinary URL was serving an extension-less file that the
 // browser saved as "INV-4" and refused to open as a PDF.
 export const getInvoicePdf = asyncHandler(async(req, res) => {
-    const inv = await Invoice.findOne({ _id: req.params.id, ...scopeFor(req) });
+    const inv = await Invoice.findOne({ _id: req.params.id, ...readScopeFor(req) });
     if (!inv) throw new ApiError(404, 'Invoice not found');
 
     const company = await companyForInvoice(inv);
@@ -289,4 +299,49 @@ export const deleteInvoice = asyncHandler(async(req, res) => {
         message: orderReverted ?
             'Invoice deleted, order reverted to Confirmed.' : 'Invoice deleted. The order still has other invoices.',
     });
+});
+
+// ── POST /api/invoices/:id/payments — record a payment against an invoice ──────
+export const recordPayment = asyncHandler(async (req, res) => {
+    const inv = await Invoice.findOne({ _id: req.params.id, ...tenantScope(req) });
+    if (!inv) throw new ApiError(404, 'Invoice not found');
+
+    const { amount, method, date, note } = req.body;
+    const amt = Number(amount);
+    if (!amt || amt <= 0) throw new ApiError(400, 'Amount must be greater than 0');
+
+    // Auto receipt number: invoice number + payment index
+    const receiptNo = (inv.invoiceNo * 100) + inv.payments.length + 1;
+
+    inv.payments.push({
+        receiptNo,
+        date:       date ? new Date(date) : new Date(),
+        method:     method || 'Cash',
+        amount:     amt,
+        note:       note || '',
+        recordedBy: req.user.name,
+    });
+
+    // Recompute due and payment status
+    const totalPaid = inv.payments.reduce((s, p) => s + p.amount, 0);
+    inv.due = Math.max(0, Number((inv.total - totalPaid).toFixed(2)));
+    inv.paymentStatus = inv.due <= 0 ? 'Paid' : totalPaid > 0 ? 'Partial' : 'Unpaid';
+
+    await inv.save();
+    res.json({ success: true, invoice: inv });
+});
+
+// ── DELETE /api/invoices/:id/payments/:pid — delete a payment entry ───────────
+export const deletePayment = asyncHandler(async (req, res) => {
+    const inv = await Invoice.findOne({ _id: req.params.id, ...tenantScope(req) });
+    if (!inv) throw new ApiError(404, 'Invoice not found');
+
+    inv.payments = inv.payments.filter((p) => String(p._id) !== String(req.params.pid));
+
+    const totalPaid = inv.payments.reduce((s, p) => s + p.amount, 0);
+    inv.due = Math.max(0, Number((inv.total - totalPaid).toFixed(2)));
+    inv.paymentStatus = inv.due <= 0 ? 'Paid' : totalPaid > 0 ? 'Partial' : 'Unpaid';
+
+    await inv.save();
+    res.json({ success: true, invoice: inv });
 });

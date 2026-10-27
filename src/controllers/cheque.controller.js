@@ -1,14 +1,15 @@
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { ApiError } from '../utils/ApiError.js';
-import { Cheque, CHEQUE_STATUSES } from '../models/Cheque.js';
+import { Cheque, CHEQUE_STATUSES, CHEQUE_TYPES } from '../models/Cheque.js';
 import { tenantScope, tenantCompanyId } from '../middleware/auth.js';
 
 // Tenant-wide read: any authenticated user in the company can view the
 // cheque calendar (consistent with orders/invoices being viewable by all).
 export const listCheques = asyncHandler(async (req, res) => {
-    const { from, to, status } = req.query;
+    const { from, to, status, type } = req.query;
     const q = { ...tenantScope(req) };
     if (status && CHEQUE_STATUSES.includes(status)) q.status = status;
+    if (type && CHEQUE_TYPES.includes(type)) q.type = type;
     if (from || to) {
         q.chequeDate = {};
         if (from) q.chequeDate.$gte = new Date(from);
@@ -29,7 +30,7 @@ export const getCheque = asyncHandler(async (req, res) => {
 });
 
 export const createCheque = asyncHandler(async (req, res) => {
-    const { lead, customer, mobile, country, amount, chequeDate, chequeNumber, bank, notes } = req.body;
+    const { lead, customer, mobile, country, amount, chequeDate, chequeNumber, bank, notes, type } = req.body;
 
     if (!customer || !String(customer).trim()) throw new ApiError(400, 'Customer name is required');
     if (!chequeDate) throw new ApiError(400, 'Cheque collection date is required');
@@ -41,6 +42,7 @@ export const createCheque = asyncHandler(async (req, res) => {
     const cheque = await Cheque.create({
         company: companyId,
         lead: lead || null,
+        type: CHEQUE_TYPES.includes(type) ? type : 'Receivable',
         customer: customer.trim(),
         mobile: mobile || '',
         country: country || 'UAE',
@@ -61,7 +63,7 @@ export const updateCheque = asyncHandler(async (req, res) => {
     const cheque = await Cheque.findOne({ _id: req.params.id, ...tenantScope(req) });
     if (!cheque) throw new ApiError(404, 'Cheque not found');
 
-    const fields = ['lead', 'customer', 'mobile', 'country', 'amount', 'chequeDate', 'chequeNumber', 'bank', 'notes'];
+    const fields = ['lead', 'type', 'customer', 'mobile', 'country', 'amount', 'chequeDate', 'chequeNumber', 'bank', 'notes'];
     fields.forEach((f) => { if (req.body[f] !== undefined) cheque[f] = req.body[f]; });
 
     // Rescheduling the date makes the reminder eligible again for the new

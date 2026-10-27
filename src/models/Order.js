@@ -71,4 +71,11 @@ orderSchema.methods.recalc = function() {
 };
 
 export { ORDER_STATUSES, DELIVERY_STATUSES };
+
+// Compound indexes
+orderSchema.index({ company: 1, createdAt: -1 });
+orderSchema.index({ company: 1, status: 1, createdAt: -1 });
+orderSchema.index({ company: 1, salesperson: 1, createdAt: -1 });
+orderSchema.index({ company: 1, country: 1 });
+
 export const Order = mongoose.model('Order', orderSchema);

@@ -1,7 +1,8 @@
-import { Router } from 'express';
+﻿import { Router } from 'express';
 import {
   listInvoices, getInvoice, convertOrder, updateInvoiceItems, deleteInvoice,
   getInvoicePdf, regenerateInvoicePdf, setPaymentStatus,
+  recordPayment, deletePayment,
 } from '../controllers/invoice.controller.js';
 import { protect, authorize } from '../middleware/auth.js';
 import { validate } from '../middleware/validate.js';
@@ -17,4 +18,6 @@ router.post('/from-order/:id', validate(idParam), convertOrder);
 router.put('/:id/items', validate(invoiceItemsSchema), updateInvoiceItems);
 router.patch('/:id/payment', validate(invoicePaymentSchema), setPaymentStatus);
 router.delete('/:id', authorize('admin'), validate(idParam), deleteInvoice);
+router.post('/:id/payments', recordPayment);
+router.delete('/:id/payments/:pid', authorize('admin'), deletePayment);
 export default router;

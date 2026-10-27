@@ -6,6 +6,7 @@ import { Order } from '../models/Order.js';
 import { Lead } from '../models/Lead.js';
 import { Attendance } from '../models/Attendance.js';
 import { tenantScope, tenantCompanyId } from '../middleware/auth.js';
+import { decryptPassword } from '../utils/crypto.js';
 
 // Local YYYY-MM-DD (office-local day) to match attendance records.
 const todayStr = () => {
@@ -16,7 +17,7 @@ const todayStr = () => {
 export const listUsers = asyncHandler(async(req, res) => {
     const scope = tenantScope(req);
     const users = await User.find({...scope, role: { $ne: 'developer' } })
-        .select('+visiblePassword')
+        .select('+encryptedPassword')
         .sort({ createdAt: 1 });
     // Order counts must be scoped to the same company so one tenant's order
     // volume can never bleed into another's user list.
@@ -27,9 +28,22 @@ export const listUsers = asyncHandler(async(req, res) => {
     const map = Object.fromEntries(counts.map((c) => [String(c._id), c.n]));
     res.json({
         success: true,
-        // `password` is the admin-visible copy (Option B). This route is admin-only,
-        // so it is never exposed to sales users.
-        users: users.map((u) => ({...u.toSafeJSON(), orders: map[String(u._id)] || 0, password: u.visiblePassword || '' })),
+        // `password` is decrypted server-side from the AES-256-GCM encrypted
+        // field — the DB never holds plaintext. This route is admin-only so it
+        // is never exposed to sales users.
+        users: users.map((u) => {
+            let password = '';
+            if (u.encryptedPassword) {
+                try {
+                    password = decryptPassword(u.encryptedPassword);
+                } catch {
+                    // Decryption failure (wrong key, corrupted value) — return
+                    // empty rather than crashing the entire user list response.
+                    password = '';
+                }
+            }
+            return { ...u.toSafeJSON(), orders: map[String(u._id)] || 0, password };
+        }),
     });
 });
 
@@ -197,7 +211,7 @@ export const updateUser = asyncHandler(async(req, res) => {
     const { name, password, active } = req.body;
     if (name !== undefined) user.name = name;
     if (active !== undefined) user.active = active;
-    if (password) user.password = password;
+    if (password) user.password = password; // pre-save hook re-encrypts + re-hashes
     if (req.body.email !== undefined) user.email = String(req.body.email || '').toLowerCase().trim();
     if (req.body.clockInLocation !== undefined) {
         user.clockInLocation = sanitizeClockInLocation(req.body.clockInLocation);

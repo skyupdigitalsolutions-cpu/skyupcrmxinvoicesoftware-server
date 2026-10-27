@@ -54,4 +54,8 @@ attendanceSchema.methods.recalcBreakMinutes = function() {
     }, 0);
 };
 
+// Compound indexes
+attendanceSchema.index({ company: 1, date: 1 });
+attendanceSchema.index({ company: 1, user: 1, date: 1 });
+
 export const Attendance = mongoose.model('Attendance', attendanceSchema);

@@ -175,17 +175,40 @@ export const dashboard = asyncHandler(async(req, res) => {
     const leadsOverTime = buckets.map((b, i) => ({ label: b.label, date: b.key, newLeads: newSeries[i], converted: convSeries[i] }));
 
     // Top employees by lead count (admin only — employees see just themselves).
+    // Group by the stable owner ID, not the per-lead ownerName snapshot —
+    // that snapshot is written once at assignment time and goes stale if the
+    // user's name/username is changed later, which used to split one person
+    // into two separate rows (old leads under the old name, new leads under
+    // the new one). Resolving the CURRENT name after grouping keeps one row
+    // per person regardless of how many times their name has changed.
     const empMap = {};
     leads.forEach((l) => {
-        const name = l.ownerName || '—';
-        empMap[name] = empMap[name] || { name, leads: 0, converted: 0 };
-        empMap[name].leads += 1;
-        if (isBuyer(l)) empMap[name].converted += 1;
+        const key = String(l.owner || 'unknown');
+        if (!empMap[key]) empMap[key] = { key, name: l.ownerName || '', leads: 0, converted: 0 };
+        if (l.ownerName && !empMap[key].name) empMap[key].name = l.ownerName;
+        empMap[key].leads += 1;
+        if (isBuyer(l)) empMap[key].converted += 1;
     });
-    const topEmployees = Object.values(empMap).sort((a, b) => b.leads - a.leads).slice(0, 6);
+    // ownerName is stored on every lead at assignment time — no extra
+    // User.find() round-trip needed for topEmployees.
+    const topEmployees = Object.values(empMap)
+        .map((e) => ({ name: e.name || 'Unknown', leads: e.leads, converted: e.converted }))
+        .sort((a, b) => b.leads - a.leads)
+        .slice(0, 6);
+
+    // Delivery stage breakdown from orders for dashboard KPI pills.
+    const deliveryByStage = {};
+    orders.forEach((o) => {
+        const stage = o.deliveryStatus || o.status;
+        const validStages = ['Pending', 'Confirmed', 'Packed', 'Market Delay', 'Out for Delivery'];
+        if (validStages.includes(stage)) {
+            deliveryByStage[stage] = (deliveryByStage[stage] || 0) + 1;
+        }
+    });
 
     res.json({
         success: true,
+        deliveryByStage,
         stats: {
             totalOrders: orders.length,
             pending: byStatus['Pending'] || 0,
@@ -251,7 +274,7 @@ export const salesReport = asyncHandler(async(req, res) => {
     const orders = await Order.find(match);
     const invoices = await Invoice.find(invoiceMatch);
 
-    const bySalesperson = {};
+    const bySalespersonMap = {};
     const byCountry = {};
     const byStatus = {};
     let revenue = 0,
@@ -261,11 +284,30 @@ export const salesReport = asyncHandler(async(req, res) => {
         revenue += o.grandTotal;
         const u = o.items.reduce((s, it) => s + it.qty, 0);
         units += u;
-        bySalesperson[o.salespersonName || '—'] = bySalesperson[o.salespersonName || '—'] || { orders: 0, revenue: 0 };
-        bySalesperson[o.salespersonName || '—'].orders += 1;
-        bySalesperson[o.salespersonName || '—'].revenue += o.grandTotal;
+        // Group by the stable salesperson ID, not the per-order salespersonName
+        // snapshot — that snapshot is written once when the order is created
+        // and goes stale if the user's name/username is changed later, which
+        // used to split one person into two separate rows in this panel
+        // (same issue as the Top Employees widget above).
+        const key = String(o.salesperson || 'unknown');
+        if (!bySalespersonMap[key]) bySalespersonMap[key] = { orders: 0, revenue: 0 };
+        bySalespersonMap[key].orders += 1;
+        bySalespersonMap[key].revenue += o.grandTotal;
         byCountry[o.country] = (byCountry[o.country] || 0) + o.grandTotal;
         byStatus[o.status] = (byStatus[o.status] || 0) + 1;
+    });
+
+    // Resolve each salesperson's CURRENT name after grouping, so a later
+    // name/username change can't split them into two rows.
+    const spIds = Object.keys(bySalespersonMap).filter((k) => k !== 'unknown');
+    const spUsers = spIds.length ? await User.find({ _id: { $in: spIds } }).select('name').lean() : [];
+    const spNameById = new Map(spUsers.map((u) => [String(u._id), u.name]));
+    const bySalesperson = {};
+    Object.entries(bySalespersonMap).forEach(([key, val]) => {
+        const name = key === 'unknown' ? '—' : (spNameById.get(key) || '—');
+        bySalesperson[name] = bySalesperson[name] || { orders: 0, revenue: 0 };
+        bySalesperson[name].orders += val.orders;
+        bySalesperson[name].revenue += val.revenue;
     });
 
     const vatCollected = invoices.reduce((s, v) => s + v.vatAmt, 0);
@@ -443,9 +485,12 @@ export const dailyReport = asyncHandler(async(req, res) => {
     // (Shipped / Out for Delivery / Delivered) on this day, per statusHistory.
     const DELIVERY_STAGES = ['Shipped', 'Out for Delivery', 'Delivered'];
     const deliveryScope = req.user.role === 'sales' ? {...t, salesperson: req.user._id } : t;
-    const allOrdersForDelivery = await Order.find({...deliveryScope, status: { $in: [...DELIVERY_STAGES, 'Invoiced'] } })
-        .select('orderNo customer city country mobile salespersonName status delivery statusHistory')
-        .lean();
+    // Single Order query covers both delivery-activity (status in DELIVERY_STAGES|Invoiced)
+    // and pending-delivery (status not in Delivered|Cancelled) — union is all non-cancelled.
+    const allOrdersForDelivery = await Order.find({
+        ...deliveryScope,
+        status: { $nin: ['Cancelled'] },
+    }).select('orderNo customer city country mobile salespersonName status delivery deliveryStatus invoiceId statusHistory createdAt date').lean();
     const deliveries = [];
     allOrdersForDelivery.forEach((o) => {
         (o.statusHistory || []).forEach((h) => {
@@ -477,13 +522,10 @@ export const dailyReport = asyncHandler(async(req, res) => {
     // 'Delivered'. Stage is read from the status log (invoiced ⇒ at least
     // 'Confirmed', matching the Delivery Tracker).
     const STAGE_ORDER = ['Pending', 'Confirmed', 'Market Delay', 'Packed', 'Out for Delivery', 'Delivered'];
-    const openOrders = await Order.find({
-            ...deliveryScope,
-            status: { $nin: ['Delivered', 'Cancelled'] },
-        })
-        .select('orderNo customer city country mobile salespersonName status delivery deliveryStatus invoiceId statusHistory createdAt date')
-        .sort({ createdAt: -1 })
-        .lean();
+    // Reuse allOrdersForDelivery — already fetched above, filter in-memory
+    const openOrders = allOrdersForDelivery
+        .filter(o => !['Delivered', 'Cancelled'].includes(o.status))
+        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     const stageOfOrder = (o) => {
         const hits = (o.statusHistory || [])
             .filter((h) => STAGE_ORDER.includes(h.status))
@@ -573,10 +615,50 @@ export const dailyReport = asyncHandler(async(req, res) => {
         orders,
         invoices,
         deliveries,
+        deliveryByStage: pendingDeliveries.reduce((acc, pd) => {
+            acc[pd.stage] = (acc[pd.stage] || 0) + 1;
+            return acc;
+        }, {}),
         pendingDeliveries,
         followUps,
         conversions: dayLeads
             .filter((l) => isBuyer(l))
             .map((l) => ({ _id: l._id, name: l.name, campaign: l.campaign, assignedUserName: l.ownerName, source: l.source })),
     });
+});
+
+// ── Monthly comparison: last 6 months of Buyer + Opportunity counts ──────────
+export const monthlyComparison = asyncHandler(async (req, res) => {
+    const scope = tenantScope(req);
+    const now = new Date();
+
+    const months = [];
+    for (let i = 5; i >= 0; i--) {
+        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        months.push({
+            key: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`,
+            label: d.toLocaleDateString('en-US', { month: 'short', year: '2-digit' }),
+            start: new Date(d.getFullYear(), d.getMonth(), 1),
+            end: new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59, 999),
+        });
+    }
+
+    const leads = await Lead.find({
+        ...scope,
+        createdAt: { $gte: months[0].start, $lte: months[months.length - 1].end },
+    }).select('status converted createdAt').lean();
+
+    const result = months.map(({ key, label, start, end }) => {
+        const monthLeads = leads.filter(l => {
+            const t = new Date(l.createdAt).getTime();
+            return t >= start.getTime() && t <= end.getTime();
+        });
+        const buyers      = monthLeads.filter(l => l.status === 'Won' || l.converted).length;
+        const opportunity = monthLeads.filter(l => l.status === 'Interested' || l.status === 'Contacted').length;
+        const enquiry     = monthLeads.filter(l => l.status === 'Follow-up').length;
+        const newLeads    = monthLeads.filter(l => l.status === 'New').length;
+        return { key, label, buyers, opportunity, enquiry, newLeads, total: monthLeads.length };
+    });
+
+    res.json({ success: true, months: result });
 });

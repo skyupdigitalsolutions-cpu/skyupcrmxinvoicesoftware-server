@@ -37,7 +37,12 @@ app.use(cors({
     credentials: true,
 }));
 
-app.use(helmet()); // secure HTTP headers
+app.use(helmet({
+  // Disable HSTS in development — it forces HTTPS and breaks localhost HTTP connections
+  hsts: env.isProd ? { maxAge: 31536000, includeSubDomains: true } : false,
+  // Disable upgrade-insecure-requests in dev too
+  contentSecurityPolicy: env.isProd,
+})); // secure HTTP headers
 app.use(express.json({ limit: '6mb' })); // body size cap (base64 logo uploads need headroom)
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());

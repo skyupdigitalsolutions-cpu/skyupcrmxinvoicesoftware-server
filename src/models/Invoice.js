@@ -6,6 +6,19 @@ import mongoose from 'mongoose';
 // so the stored subTotal/vatAmt/total always match what the PDF prints.
 const VAT_RATE = 0.05;
 
+
+const paymentSchema = new mongoose.Schema(
+  {
+    receiptNo:  { type: Number, required: true },
+    date:       { type: Date, default: Date.now },
+    method:     { type: String, enum: ['Cash', 'Bank Transfer', 'Cheque', 'Card', 'Online', 'Other'], default: 'Cash' },
+    amount:     { type: Number, required: true, min: 0 },
+    note:       { type: String, default: '' },
+    recordedBy: { type: String, default: '' },
+  },
+  { _id: true }
+);
+
 const invoiceItemSchema = new mongoose.Schema(
   {
     modelCode: { type: String, required: true, trim: true },
@@ -32,6 +45,8 @@ const invoiceSchema = new mongoose.Schema(
     mobile: { type: String, default: '' },
     salespersonName: { type: String, default: '' },
     paymentStatus: { type: String, enum: ['Unpaid', 'Partial', 'Paid'], default: 'Unpaid', index: true },
+    due:           { type: Number, default: 0 },
+    payments:      { type: [paymentSchema], default: [] },
     items: { type: [invoiceItemSchema], default: [] },
     // Tax rate (as a percent, e.g. 5) actually applied to THIS invoice, captured
     // at creation time so a later change to the company's default rate never
@@ -76,5 +91,7 @@ invoiceSchema.methods.recalc = function (taxPercent) {
 
 export { VAT_RATE };
 invoiceSchema.index({ company: 1, invoiceNo: 1 }, { unique: true });
+invoiceSchema.index({ company: 1, createdAt: -1 });
+invoiceSchema.index({ company: 1, status: 1 });
 
 export const Invoice = mongoose.model('Invoice', invoiceSchema);
