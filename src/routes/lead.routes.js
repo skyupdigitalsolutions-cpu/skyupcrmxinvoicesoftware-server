@@ -6,6 +6,7 @@ import {
     getLead,
     createLead,
     bulkCreateLeads,
+    bulkUpdateLeads,
     updateLead,
     setLeadStatus,
     logCall,
@@ -39,6 +40,10 @@ router.post('/merge', authorize('admin'), mergeLeads);
 // ── Bulk CSV import (one request for up to 2000 leads) ───────────────────────
 // Declared before /:id routes.
 router.post('/bulk', bulkCreateLeads);
+
+// ── Bulk UPDATE of existing leads from an exported+edited file (admin only) ──
+// Declared before /:id so 'bulk-update' isn't captured as an id.
+router.put('/bulk-update', authorize('admin'), bulkUpdateLeads);
 
 // ── CRUD ──────────────────────────────────────────────────────────────────────
 router.get('/', listLeads);

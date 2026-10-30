@@ -290,22 +290,27 @@ export const salesReport = asyncHandler(async(req, res) => {
         // used to split one person into two separate rows in this panel
         // (same issue as the Top Employees widget above).
         const key = String(o.salesperson || 'unknown');
-        if (!bySalespersonMap[key]) bySalespersonMap[key] = { orders: 0, revenue: 0 };
+        if (!bySalespersonMap[key]) bySalespersonMap[key] = { orders: 0, revenue: 0, snapshotName: '' };
         bySalespersonMap[key].orders += 1;
         bySalespersonMap[key].revenue += o.grandTotal;
+        // Keep the snapshot name as a fallback for deleted users / orders
+        // whose salesperson id no longer resolves.
+        if (!bySalespersonMap[key].snapshotName && o.salespersonName) {
+            bySalespersonMap[key].snapshotName = o.salespersonName;
+        }
         byCountry[o.country] = (byCountry[o.country] || 0) + o.grandTotal;
         byStatus[o.status] = (byStatus[o.status] || 0) + 1;
     });
 
     // Resolve each salesperson's CURRENT name after grouping, so a later
     // name/username change can't split them into two rows.
-    const spIds = Object.keys(bySalespersonMap).filter((k) => k !== 'unknown');
-    // ownerName is stored on each order — no extra User.find() needed
-    const spUsers = [];
+    const spIds = Object.keys(bySalespersonMap).filter((k) => /^[0-9a-fA-F]{24}$/.test(k));
+    const spUsers = spIds.length ?
+        await User.find({ _id: { $in: spIds }, ...t }).select('name').lean() : [];
     const spNameById = new Map(spUsers.map((u) => [String(u._id), u.name]));
     const bySalesperson = {};
     Object.entries(bySalespersonMap).forEach(([key, val]) => {
-        const name = key === 'unknown' ? '—' : (spNameById.get(key) || '—');
+        const name = (key !== 'unknown' && spNameById.get(key)) || val.snapshotName || '—';
         bySalesperson[name] = bySalesperson[name] || { orders: 0, revenue: 0 };
         bySalesperson[name].orders += val.orders;
         bySalesperson[name].revenue += val.revenue;

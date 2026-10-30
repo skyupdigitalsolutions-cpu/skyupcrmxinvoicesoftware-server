@@ -458,6 +458,180 @@ export const bulkCreateLeads = asyncHandler(async (req, res) => {
 // is at createLead time, where it's guarded by both a pre-check and the
 // unique (company, mobileKey) index. If the number is genuinely wrong, use
 // deleteLead + createLead (or mergeLeads) instead of changing it in place.
+// ── Bulk UPDATE of existing leads (admin only) ───────────────────────────────
+// Counterpart to the CSV import: the admin exports leads (each row carries its
+// Lead ID), edits the file, and re-uploads it. Rows are matched by _id — never
+// by phone — so a corrected phone number updates the lead instead of creating
+// a duplicate. Only fields present on a row are touched; every real change is
+// recorded in the lead's editHistory exactly like a manual edit.
+//
+// PUT /leads/bulk-update   body: { updates: [{ _id, name?, mobile?, country?,
+//   email?, city?, source?, campaign?, interest?, remark?, delivery?, status?,
+//   owner? (user NAME), followUpAt? ('YYYY-MM-DD' | '') }] }
+const BULK_UPDATE_MAX = 1000;
+const OID_RX = /^[0-9a-fA-F]{24}$/;
+
+export const bulkUpdateLeads = asyncHandler(async (req, res) => {
+    const rows = Array.isArray(req.body?.updates) ? req.body.updates : [];
+    if (!rows.length) throw new ApiError(400, 'No updates supplied');
+    if (rows.length > BULK_UPDATE_MAX) {
+        throw new ApiError(400, `At most ${BULK_UPDATE_MAX} leads can be updated per request (received ${rows.length}).`);
+    }
+
+    const scope = tenantScope(req);
+    const ids = [...new Set(rows.map((r) => String(r?._id || '')).filter((id) => OID_RX.test(id)))];
+    const leads = await Lead.find({ _id: { $in: ids }, ...scope });
+    const leadById = new Map(leads.map((l) => [String(l._id), l]));
+
+    // Company users, for resolving the Owner column by name.
+    const { User } = await import('../models/User.js');
+    const companyId = leads[0]?.company || tenantCompanyId(req);
+    const users = await User.find({ company: companyId }).select('name').lean();
+    const usersByName = new Map();
+    users.forEach((u) => {
+        const k = String(u.name || '').trim().toLowerCase();
+        if (!usersByName.has(k)) usersByName.set(k, []);
+        usersByName.get(k).push(u);
+    });
+
+    const str = (v) => (v == null ? '' : String(v).trim());
+    const result = { updated: 0, unchanged: 0, failed: 0, errors: [] };
+    const fail = (label, msg) => { result.failed++; result.errors.push(`${label}: ${msg}`); };
+    const touched = [];
+
+    for (const r of rows) {
+        const id = String(r?._id || '');
+        const label = r?.name ? `${r.name}` : (id || 'row');
+        if (!OID_RX.test(id)) { fail(label, 'missing or invalid Lead ID'); continue; }
+        const lead = leadById.get(id);
+        if (!lead) { fail(label, 'lead not found (deleted, or belongs to another company)'); continue; }
+        const tag = `${lead.name}`;
+
+        try {
+            const next = {};          // simple fields → new value
+            const changes = [];       // editHistory entries
+
+            // ── simple text fields ──────────────────────────────────────
+            if (r.name !== undefined) {
+                const v = str(r.name);
+                if (!v) throw new Error('name cannot be empty');
+                next.name = v;
+            }
+            ['city', 'campaign', 'interest', 'remark', 'delivery'].forEach((f) => {
+                if (r[f] !== undefined) next[f] = str(r[f]);
+            });
+            if (r.email !== undefined) {
+                const v = str(r.email).toLowerCase();
+                if (v && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) throw new Error(`invalid email "${v}"`);
+                next.email = v;
+            }
+            if (r.source !== undefined && str(r.source)) {
+                const v = str(r.source);
+                const match = LEAD_SOURCES.find((s) => s.toLowerCase() === v.toLowerCase());
+                if (!match) throw new Error(`unknown source "${v}" (use: ${LEAD_SOURCES.join(', ')})`);
+                next.source = match;
+            }
+            if (r.status !== undefined && str(r.status)) {
+                const v = str(r.status);
+                const match = LEAD_STATUSES.find((s) => s.toLowerCase() === v.toLowerCase());
+                if (!match) throw new Error(`unknown status "${v}" (use: ${LEAD_STATUSES.join(', ')})`);
+                if (match === 'Won' && lead.status !== 'Won') {
+                    throw new Error('status "Won" is set by converting the lead to an order, not by bulk update');
+                }
+                next.status = match;
+            }
+            if (r.country !== undefined && str(r.country)) next.country = str(r.country);
+
+            // ── follow-up date ──────────────────────────────────────────
+            if (r.followUpAt !== undefined) {
+                const v = str(r.followUpAt);
+                if (!v) next.followUpAt = null;
+                else {
+                    const d = new Date(/^\d{4}-\d{2}-\d{2}$/.test(v) ? `${v}T09:00:00` : v);
+                    if (Number.isNaN(d.getTime())) throw new Error(`invalid follow-up date "${v}" (use YYYY-MM-DD)`);
+                    next.followUpAt = d;
+                }
+            }
+
+            // ── diff the simple fields ──────────────────────────────────
+            const simple = ['name', 'country', 'city', 'email', 'source', 'campaign', 'interest', 'remark', 'delivery', 'status', 'followUpAt'];
+            const fieldChanges = diffFields(lead, next, simple);
+            changes.push(...fieldChanges);
+
+            // ── mobile / country → mobileKey, with duplicate guard ─────
+            const newCountry = next.country !== undefined ? next.country : lead.country;
+            let newMobile = lead.mobile;
+            if (r.mobile !== undefined && str(r.mobile)) {
+                const raw = str(r.mobile);
+                if (/e\+?\d+$/i.test(raw) && /^[\d.]+e/i.test(raw)) {
+                    throw new Error(`mobile "${raw}" was converted to scientific notation by Excel — format the column as Text and re-enter it`);
+                }
+                const digits = raw.replace(/\D/g, '');
+                if (digits.length < 6) throw new Error(`mobile "${raw}" is too short`);
+                newMobile = raw;
+            }
+            const oldKey = lead.mobileKey || '';
+            const newKey = normalizePhone(newMobile, newCountry);
+            if (newKey && newKey !== oldKey) {
+                const dup = await Lead.findOne({ mobileKey: newKey, company: lead.company, _id: { $ne: lead._id } }).select('name').lean();
+                if (dup) throw new Error(`mobile ${newMobile} is already assigned to lead "${dup.name}"`);
+                if (newMobile !== lead.mobile) changes.push({ field: 'mobile', from: lead.mobile, to: newMobile });
+            } else if (newMobile !== lead.mobile && normalizePhone(newMobile, newCountry) === oldKey) {
+                // same number written differently — keep the stored value
+                newMobile = lead.mobile;
+            }
+
+            // ── owner (by name) ─────────────────────────────────────────
+            let newOwner = null;
+            if (r.owner !== undefined && str(r.owner) && str(r.owner) !== (lead.ownerName || '')) {
+                const matches = usersByName.get(str(r.owner).toLowerCase()) || [];
+                if (!matches.length) throw new Error(`owner "${str(r.owner)}" not found`);
+                if (matches.length > 1) throw new Error(`owner name "${str(r.owner)}" matches more than one user`);
+                if (String(matches[0]._id) !== String(lead.owner)) {
+                    newOwner = matches[0];
+                    changes.push({ field: 'owner', from: lead.ownerName || null, to: newOwner.name });
+                }
+            }
+
+            if (!changes.length) { result.unchanged++; continue; }
+
+            // ── apply ───────────────────────────────────────────────────
+            fieldChanges.forEach((c) => { lead[c.field] = next[c.field]; });
+            if (newMobile !== lead.mobile) lead.mobile = newMobile;
+            if (newKey && newKey !== oldKey) lead.mobileKey = newKey;
+            if (newOwner) { lead.owner = newOwner._id; lead.ownerName = newOwner.name; }
+            lead.editHistory.push({ by: req.user._id, byName: `${req.user.name} (bulk update)`, changes });
+            await lead.save();
+
+            result.updated++;
+            touched.push(lead.name);
+        } catch (err) {
+            // Duplicate-key from the unique (company, mobileKey) index is a race backstop.
+            const msg = err?.code === 11000 ? 'that mobile number already belongs to another lead' : (err.message || 'update failed');
+            fail(tag, msg);
+        }
+    }
+
+    // One summary notification for the other admins instead of one per lead.
+    if (result.updated) {
+        const admins = await adminsOf(companyId);
+        const recipients = admins.filter((id) => String(id) !== String(req.user._id));
+        if (recipients.length) {
+            notifyUsers({
+                company: companyId,
+                recipients,
+                type: 'lead-edited',
+                title: `Bulk lead update: ${result.updated} lead${result.updated === 1 ? '' : 's'}`,
+                body: `${req.user.name} updated ${result.updated} lead${result.updated === 1 ? '' : 's'} via file upload.`,
+                link: '/leads',
+            });
+        }
+    }
+
+    res.json({ success: true, ...result });
+});
+
+
 export const updateLead = asyncHandler(async(req, res) => {
     const lead = await Lead.findOne({ _id: req.params.id, ...tenantScope(req) });
     if (!lead) throw new ApiError(404, 'Lead not found');
