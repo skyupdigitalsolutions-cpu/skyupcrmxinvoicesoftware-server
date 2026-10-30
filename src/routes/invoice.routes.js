@@ -1,8 +1,7 @@
-﻿import { Router } from 'express';
+import { Router } from 'express';
 import {
   listInvoices, getInvoice, convertOrder, updateInvoiceItems, deleteInvoice,
   getInvoicePdf, regenerateInvoicePdf, setPaymentStatus,
-  recordPayment, deletePayment,
 } from '../controllers/invoice.controller.js';
 import { protect, authorize } from '../middleware/auth.js';
 import { validate } from '../middleware/validate.js';

@@ -48,7 +48,10 @@ export const listOrders = asyncHandler(async(req, res) => {
         if (phone) phone.rawFieldRegexes.forEach((r) => q.$or.push({ mobile: r }));
     }
 
-    const orders = await Order.find(q).sort({ createdAt: -1 });    res.json({ success: true, orders });
+    const orders = await Order.find(q)
+        .select('orderNo date customer mobile country city salesperson salespersonName status delivery deliveryStatus payTerms grandTotal due items invoiceId createdAt updatedAt')
+        .sort({ createdAt: -1 })
+        .lean();    res.json({ success: true, orders });
 });
 
 export const getOrder = asyncHandler(async(req, res) => {

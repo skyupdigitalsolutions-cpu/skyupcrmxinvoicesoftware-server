@@ -300,7 +300,8 @@ export const salesReport = asyncHandler(async(req, res) => {
     // Resolve each salesperson's CURRENT name after grouping, so a later
     // name/username change can't split them into two rows.
     const spIds = Object.keys(bySalespersonMap).filter((k) => k !== 'unknown');
-    const spUsers = spIds.length ? await User.find({ _id: { $in: spIds } }).select('name').lean() : [];
+    // ownerName is stored on each order — no extra User.find() needed
+    const spUsers = [];
     const spNameById = new Map(spUsers.map((u) => [String(u._id), u.name]));
     const bySalesperson = {};
     Object.entries(bySalespersonMap).forEach(([key, val]) => {

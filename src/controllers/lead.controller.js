@@ -133,14 +133,31 @@ export const listLeads = asyncHandler(async(req, res) => {
         return res.json({ success: true, leads: leanLeads });
     }
 
-    const leads = await Lead.find(q).sort({ createdAt: -1 });
+    // Select only the fields the list view needs — excludes heavy arrays
+    // (editHistory, callLogs full text) to keep payload small for 7500+ leads.
+    // The lead detail page fetches the full document separately.
+    const projection = {
+        name: 1, mobile: 1, altMobile: 1, country: 1, city: 1,
+        email: 1, source: 1, campaign: 1, interest: 1, remark: 1,
+        status: 1, converted: 1, orderNo: 1, owner: 1, ownerName: 1,
+        mobileKey: 1, createdAt: 1, updatedAt: 1, delivery: 1,
+        followUpAt: 1, monthlyReset: 1,
+        // Include notes + callLogs summary (count only via slice trick)
+        notes: { $slice: -1 },      // last note only for list display
+        callLogs: { $slice: -1 },   // last call only
+        // editHistory: admin gets it on detail page, skip on list
+    };
 
-    // Edit history is admin-only — strip it out for sales users' own view.
-    const out = req.user.role === 'admin' ?
-        leads :
-        leads.map((l) => { const o = l.toObject(); delete o.editHistory; return o; });
+    // Admin gets editHistory only when explicitly requested (?with=editHistory)
+    if (req.user.role === 'admin' && req.query.with === 'editHistory') {
+        delete projection.notes;
+        delete projection.callLogs;
+        const fullLeads = await Lead.find(q).sort({ createdAt: -1 }).lean();
+        return res.json({ success: true, leads: fullLeads });
+    }
 
-    res.json({ success: true, leads: out });
+    const leads = await Lead.find(q, projection).sort({ createdAt: -1 }).lean();
+    res.json({ success: true, leads });
 });
 
 // ── Get single lead (owner OR any authenticated user — for cross-employee view) ──
@@ -292,47 +309,78 @@ export const bulkCreateLeads = asyncHandler(async (req, res) => {
     if (!company) throw new ApiError(404, 'Company not found');
 
 
-    // Pre-load existing phone keys for this company (one query, not one per row)
+    // Pre-load existing leads for this company by phone key (for merge)
     const keysInFile = rows
         .map((r) => normalizePhone(r?.mobile, r?.country || 'UAE'))
         .filter(Boolean);
-    const existing = keysInFile.length
-        ? await Lead.find({ company: companyId, mobileKey: { $in: keysInFile } }, { mobileKey: 1 }).lean()
+    const existingLeads = keysInFile.length
+        ? await Lead.find({ company: companyId, mobileKey: { $in: keysInFile } }).lean()
         : [];
-    const existingKeys = new Set(existing.map((l) => l.mobileKey));
+    const existingByKey = new Map(existingLeads.map((l) => [l.mobileKey, l]));
     const seen = new Set();
 
-    const docs = [];
-    const docRow = [];      // docs[i] came from CSV row docRow[i]
+    const docs   = [];
+    const docRow = [];
+    const merges = [];
     const errors = [];
-    let skipped = 0;
+    let skipped  = 0;
+    let merged   = 0;
     const str = (v) => (v == null ? '' : String(v).trim());
 
     rows.forEach((r, i) => {
-        const rowNo = i + 1; // position in this request (client maps it to the file)
+        const rowNo = i + 1;
         const name = str(r?.name);
         const city = str(r?.city);
         if (!name) return errors.push(`Row ${rowNo}: name is required`);
 
-        const country = str(r.country) || 'UAE';
-        const mobile = str(r.mobile);
+        const country   = str(r.country) || 'UAE';
+        const mobile    = str(r.mobile);
         const mobileKey = normalizePhone(mobile, country);
-        if (mobileKey && (existingKeys.has(mobileKey) || seen.has(mobileKey))) { skipped++; return; }
+
+        if (mobileKey && seen.has(mobileKey)) { skipped++; return; }
+
+        if (mobileKey && existingByKey.has(mobileKey)) {
+            const existing = existingByKey.get(mobileKey);
+            const updates  = {};
+            const changes  = [];
+            const fieldMap = {
+                name,
+                city,
+                email:    str(r.email),
+                source:   LEAD_SOURCES.includes(r.source) ? r.source : existing.source,
+                campaign: str(r.campaign) || existing.campaign,
+                interest: str(r.interest) || existing.interest,
+                remark:   str(r.remark)   || existing.remark,
+                delivery: str(r.delivery) || existing.delivery,
+                status:   LEAD_STATUSES.includes(r.status) ? r.status : existing.status,
+            };
+            for (const [field, newVal] of Object.entries(fieldMap)) {
+                const oldVal = String(existing[field] || '');
+                if (newVal && newVal !== oldVal) {
+                    updates[field] = newVal;
+                    changes.push({ field, from: oldVal, to: newVal });
+                }
+            }
+            if (changes.length) { merges.push({ id: existing._id, updates, changes }); merged++; }
+            else skipped++;
+            if (mobileKey) seen.add(mobileKey);
+            return;
+        }
 
         const doc = new Lead({
             company: companyId,
             name, mobile, country, city,
             altCountry: country,
-            email: str(r.email),
-            source: LEAD_SOURCES.includes(r.source) ? r.source : 'Other',
+            email:    str(r.email),
+            source:   LEAD_SOURCES.includes(r.source) ? r.source : 'Other',
             campaign: str(r.campaign),
             interest: str(r.interest),
-            remark: str(r.remark),
+            remark:   str(r.remark),
             delivery: str(r.delivery),
-            status: LEAD_STATUSES.includes(r.status) ? r.status : 'New',
-            owner: req.user._id,
+            status:   LEAD_STATUSES.includes(r.status) ? r.status : 'New',
+            owner:    req.user._id,
             ownerName: req.user.name,
-            mobileKey, // insertMany does NOT run pre('save'), so set the dedup key here
+            mobileKey,
         });
         const vErr = doc.validateSync();
         if (vErr) return errors.push(`Row ${rowNo} (${name}): ${Object.values(vErr.errors).map((e) => e.message).join(', ')}`);
@@ -377,7 +425,28 @@ export const bulkCreateLeads = asyncHandler(async (req, res) => {
         }
     }
 
-    res.status(201).json({ success: true, created, skipped, failed: errors.length, errors });
+    // Apply merges — update existing leads + log to editHistory
+    if (merges.length) {
+        await Promise.allSettled(merges.map(async ({ id, updates, changes }) => {
+            try {
+                await Lead.findByIdAndUpdate(id, {
+                    $set: updates,
+                    $push: {
+                        editHistory: {
+                            by: req.user._id,
+                            byName: req.user.name,
+                            at: new Date(),
+                            changes,
+                        },
+                    },
+                });
+            } catch (e) {
+                errors.push(`Merge failed for lead ${id}: ${e.message}`);
+            }
+        }));
+    }
+
+    res.status(201).json({ success: true, created, merged, skipped, failed: errors.length, errors });
 });
 
 // ── Update core fields (owner or admin only) ──────────────────────────────────
@@ -557,18 +626,32 @@ export const addNote = asyncHandler(async(req, res) => {
 export const markLeadBuyer = asyncHandler(async(req, res) => {
     const lead = await Lead.findOne({ _id: req.params.id, ...tenantScope(req) });
     if (!lead) throw new ApiError(404, 'Lead not found');
-    if (lead.converted) return res.json({ success: true, lead }); // already converted, no-op
+    // Do NOT early-return if already converted — monthly reset sets status back
+    // to Interested while keeping converted=true, so returning customers need
+    // to be re-marked as Buyer when they place a new order.
+    // Only skip if already Won (Buyer) to avoid noise in editHistory.
+    if (lead.status === 'Won') return res.json({ success: true, lead });
 
     const { orderNo } = req.body;
+    const changes = [{ field: 'status', from: lead.status, to: 'Won' }];
 
     lead.converted = true;
     lead.status    = 'Won';
     if (orderNo) lead.orderNo = orderNo;
+
+    // Re-assign lead owner to the employee who created the order
+    // Only reassign if different from current owner
+    if (String(lead.owner) !== String(req.user._id)) {
+        changes.push({ field: 'owner', from: lead.ownerName || String(lead.owner), to: req.user.name });
+        lead.owner     = req.user._id;
+        lead.ownerName = req.user.name;
+    }
+
     lead.editHistory.push({
         by: req.user._id,
         byName: req.user.name,
         at: new Date(),
-        changes: [{ field: 'status', from: lead.status, to: 'Won' }],
+        changes,
     });
     await lead.save();
 

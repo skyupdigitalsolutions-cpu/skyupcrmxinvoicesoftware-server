@@ -91,7 +91,10 @@ export const listInvoices = asyncHandler(async(req, res) => {
         const phone = phoneSearchCandidates(search);
         if (phone) phone.rawFieldRegexes.forEach((r) => q.$or.push({ mobile: r }));
     }
-    const invoices = await Invoice.find(q).sort({ createdAt: -1 });    res.json({ success: true, invoices });
+    const invoices = await Invoice.find(q)
+        .select('invoiceNo orderNo date customer mobile country city salesperson salespersonName status paymentStatus total due subTotal discount vatAmt taxPercent payments createdAt updatedAt')
+        .sort({ createdAt: -1 })
+        .lean();    res.json({ success: true, invoices });
 });
 
 export const getInvoice = asyncHandler(async(req, res) => {
