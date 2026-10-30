@@ -49,9 +49,10 @@ export const listOrders = asyncHandler(async(req, res) => {
     }
 
     const orders = await Order.find(q)
-        .select('orderNo date customer mobile country city salesperson salespersonName status delivery deliveryStatus payTerms grandTotal due items invoiceId createdAt updatedAt')
+        .select('orderNo date customer mobile country city salesperson salespersonName status delivery deliveryStatus deliveryContact payTerms subTotal discount grandTotal due notes statusHistory items invoiceId createdAt updatedAt')
         .sort({ createdAt: -1 })
-        .lean();    res.json({ success: true, orders });
+        .lean();
+    res.json({ success: true, orders });
 });
 
 export const getOrder = asyncHandler(async(req, res) => {

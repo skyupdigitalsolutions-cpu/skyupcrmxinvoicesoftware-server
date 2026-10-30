@@ -92,9 +92,10 @@ export const listInvoices = asyncHandler(async(req, res) => {
         if (phone) phone.rawFieldRegexes.forEach((r) => q.$or.push({ mobile: r }));
     }
     const invoices = await Invoice.find(q)
-        .select('invoiceNo orderNo date customer mobile country city salesperson salespersonName status paymentStatus total due subTotal discount vatAmt taxPercent payments createdAt updatedAt')
+        .select('invoiceNo orderNo date customer mobile country city salesperson salespersonName status paymentStatus total due subTotal discount discountAmt vatAmt taxPercent payments items pdfUrl createdAt updatedAt')
         .sort({ createdAt: -1 })
-        .lean();    res.json({ success: true, invoices });
+        .lean();
+    res.json({ success: true, invoices });
 });
 
 export const getInvoice = asyncHandler(async(req, res) => {
