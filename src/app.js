@@ -19,9 +19,14 @@ const app = express();
 // It also lets req.secure / secure cookies work correctly behind the proxy.
 app.set('trust proxy', 1);
 
+// Allowed browser origins. CLIENT_URL may hold one URL or a comma-separated list;
+// CORS_ORIGINS adds more. The Cloudflare Pages production domain AND its preview
+// subdomains are always allowed, so a missing/old CLIENT_URL can't lock the app out.
+const listFromEnv = (v) => String(v || '').split(',').map((s) => s.trim().replace(/\/+$/, '')).filter(Boolean);
 const allowedOrigins = [
-    env.clientUrl,
-    /\.skyupcrmxinvoicesoftwareclient\.pages\.dev$/,
+    ...listFromEnv(env.clientUrl),
+    ...listFromEnv(process.env.CORS_ORIGINS),
+    /^https:\/\/([a-z0-9-]+\.)?skyupcrmxinvoicesoftwareclient\.pages\.dev$/,
     'http://localhost:5173',
 ];
 
