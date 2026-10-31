@@ -89,11 +89,7 @@ async function tick() {
                 {
                     company: company._id,
                     status: 'Won',
-                    // ALL Buyers reset to Opportunity every month — including
-                    // converted leads. The Buyer stage resets monthly for
-                    // the sales pipeline; re-ordering keeps them converted=true
-                    // which means a new order form will instantly mark them
-                    // Buyer again.
+                    converted: { $ne: true },
                 },
                 {
                     $set: { status: 'Interested', monthlyReset: true },
@@ -110,7 +106,7 @@ async function tick() {
                             changes: [{
                                 field: 'status',
                                 from: 'Won',
-                                to: 'Interested — all Buyers reset to Opportunity monthly',
+                                to: 'Interested — monthly Buyer → Opportunity reset',
                             }],
                         },
                     },
@@ -130,7 +126,7 @@ async function tick() {
                             recipients: admins,
                             type: 'monthly-reset',
                             title: 'Monthly stage reset completed',
-                            body: `${result.modifiedCount} lead(s) reset from Buyer → Opportunity for the new month (including converted buyers).`,
+                            body: `${result.modifiedCount} lead(s) moved from Buyer → Opportunity for the new month.`,
                             link: '/leads',
                         });
                     }

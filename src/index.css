@@ -1,0 +1,393 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: light; }
+
+/* ── Theme variables ──────────────────────────────────────────────────── */
+:root {
+  --primary: #2563EB;
+  --secondary: #1E40AF;
+
+  --bg-base: #F7F8FA;
+  --bg-header: #FFFFFF;
+  --bg-sidebar: #FFFFFF;
+  --bg-card: #FFFFFF;
+  --bg-card-head: #F7F8FA;
+  --border-card-head: #E5E7EB;
+  --border-color: #E5E7EB;
+  --header-border: #ECECEC;
+
+  --text-sidebar: #6B7280;
+  --text-sidebar-active: var(--primary);
+  --text-primary: #111827;
+  --text-secondary: #4B5563;
+  --text-muted: #9CA3AF;
+
+  --input-bg: #FFFFFF;
+  --input-border: #D1D5DB;
+
+  --sidebar-active-bg: #EFF4FF;
+
+  /* Aliases used by Dashboard, Modal and other newer pages */
+  --bg-surface: var(--bg-card);
+  --border-card: var(--border-color);
+  --text-hint: var(--text-muted);
+  --shadow-card: 0 1px 4px rgba(0, 0, 0, 0.06);
+  --shadow-lift: 0 6px 18px rgba(0, 0, 0, 0.12);
+  --table-row-hover: #F3F6FF;
+
+  /* Focus ring + custom select chevron (dark arrow for light theme) */
+  --focus-ring: rgba(37, 99, 235, 0.18);
+  --select-arrow: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%236B7280' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+}
+
+.dark {
+  color-scheme: dark;
+  --primary: #3B82F6;
+  --secondary: #60A5FA;
+
+  --bg-base: #0E1117;
+  --bg-header: #11141B;
+  --bg-sidebar: #11141B;
+  --bg-card: #161B26;
+  --bg-card-head: #1B212E;
+  --border-card-head: #232A38;
+  --border-color: #232A38;
+  --header-border: #1E232E;
+
+  --text-sidebar: #9CA3AF;
+  --text-sidebar-active: #93BBFC;
+  --text-primary: #F3F4F6;
+  --text-secondary: #C2C6CC;
+  --text-muted: #7C8493;
+
+  --input-bg: #161B26;
+  --input-border: #2A313F;
+
+  --sidebar-active-bg: rgba(59, 130, 246, 0.14);
+
+  /* Aliases used by Dashboard, Modal and other newer pages */
+  --bg-surface: var(--bg-card);
+  --border-card: var(--border-color);
+  --text-hint: var(--text-muted);
+  --shadow-card: 0 1px 4px rgba(0, 0, 0, 0.45);
+  --shadow-lift: 0 10px 28px rgba(0, 0, 0, 0.55);
+  --table-row-hover: rgba(255, 255, 255, 0.04);
+
+  /* Focus ring + custom select chevron (light arrow for dark theme) */
+  --focus-ring: rgba(59, 130, 246, 0.28);
+  --select-arrow: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%239CA3AF' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+}
+
+body {
+  margin: 0;
+  font-family: theme('fontFamily.sans');
+  font-size: 13px;
+  background-color: var(--bg-base);
+  color: var(--text-primary);
+}
+
+/* Smooth crossfade when switching themes */
+body, header, aside, main, .card, .input, .btn-outline {
+  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+
+@layer components {
+  .btn { @apply inline-flex items-center gap-1.5 rounded-md px-4 py-2 text-xs font-bold transition active:scale-[.98] disabled:opacity-50; }
+  .btn-gold { @apply btn text-white hover:opacity-90; background-color: var(--primary); }
+  .btn-dark { @apply btn text-white hover:opacity-90; background-color: var(--secondary); }
+  .btn-green { @apply btn bg-ok text-white hover:opacity-90; }
+  .btn-red { @apply btn bg-danger text-white hover:opacity-90; }
+  .btn-blue { @apply btn text-white hover:opacity-90; background-color: var(--primary); }
+  .btn-outline {
+    @apply btn border;
+    background-color: var(--bg-card);
+    color: var(--text-primary);
+    border-color: var(--input-border);
+  }
+  .btn-outline:hover { background-color: var(--bg-card-head); }
+  .btn-sm { @apply px-2.5 py-1 text-[11px]; }
+
+  .field-label {
+    @apply text-[11px] font-bold uppercase tracking-wide mb-1 block;
+    color: var(--text-secondary);
+  }
+  .input {
+    @apply w-full rounded-md px-3 py-2 text-[13px] outline-none transition border;
+    background-color: var(--input-bg);
+    border-color: var(--input-border);
+    color: var(--text-primary);
+  }
+  .input:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px var(--focus-ring);
+  }
+  .input::placeholder { color: var(--text-muted); }
+
+  /* Native <select> built on .input: custom chevron + themed popup list */
+  select.input {
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    padding-right: 2rem;
+    background-image: var(--select-arrow);
+    background-repeat: no-repeat;
+    background-position: right 0.6rem center;
+    background-size: 1rem;
+    cursor: pointer;
+  }
+  /* The open option list — browsers fall back to these colors */
+  select.input option,
+  select.input optgroup {
+    background-color: var(--bg-card);
+    color: var(--text-primary);
+  }
+
+  .card {
+    @apply rounded-lg shadow-card overflow-hidden border;
+    background-color: var(--bg-card);
+    border-color: var(--border-color);
+  }
+  .card-head {
+    @apply px-4 py-2.5 flex items-center justify-between border-b;
+    background-color: var(--bg-card-head);
+    border-color: var(--border-card-head);
+  }
+  .card-head h2 { @apply text-xs font-bold uppercase tracking-wide; color: var(--text-primary); }
+  .card-body { @apply p-4; }
+
+  .status { @apply inline-block rounded-full px-2 py-0.5 text-[10px] font-bold uppercase; }
+}
+
+/* ── Dark-mode remaps for hardcoded brand utilities ───────────────────────
+   Many components use static Tailwind colors (text-navy, text-ink-*,
+   bg-white, bg-gold-pale, etc.) that were designed for the light theme and
+   become invisible / wrong on dark backgrounds. Remap them to theme vars
+   when .dark is active so every page stays readable without touching each
+   call site. */
+.dark .text-navy,
+.dark .text-navy-700,
+.dark .text-navy-800,
+.dark .text-navy-900,
+.dark .text-ink,
+.dark .text-ink-2 { color: var(--text-primary) !important; }
+
+.dark .text-ink-3 { color: var(--text-muted) !important; }
+
+/* Light surface boxes used inside cards (stat tiles, avatars, chips) */
+.dark .bg-white { background-color: var(--bg-card) !important; }
+.dark .bg-gray-50 { background-color: var(--bg-card-head) !important; }
+.dark .bg-gold-pale { background-color: rgba(59, 130, 246, 0.14) !important; }
+.dark .bg-gold-light { background-color: rgba(59, 130, 246, 0.22) !important; }
+
+/* Light borders that vanish or glare on dark */
+.dark .border-gray-100,
+.dark .border-gray-200,
+.dark .border-gray-300 { border-color: var(--border-color) !important; }
+
+/* Row hover on tables (was hover:bg-gold-pale -> too light on dark) */
+.dark .hover\:bg-gold-pale:hover { background-color: rgba(255, 255, 255, 0.04) !important; }
+
+/* Tinted callouts / chips used inside modals (warn, purple selections) */
+.dark .bg-warn-light { background-color: rgba(230, 81, 0, 0.16) !important; }
+.dark .bg-purple-50 { background-color: rgba(168, 85, 247, 0.16) !important; }
+.dark .text-purple-700 { color: #C4B5FD !important; }
+.dark .border-purple-200,
+.dark .border-purple-300 { border-color: rgba(168, 85, 247, 0.4) !important; }@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: light; }
+
+/* ── Theme variables ──────────────────────────────────────────────────── */
+:root {
+  --primary: #2563EB;
+  --secondary: #1E40AF;
+
+  --bg-base: #F7F8FA;
+  --bg-header: #FFFFFF;
+  --bg-sidebar: #FFFFFF;
+  --bg-card: #FFFFFF;
+  --bg-card-head: #F7F8FA;
+  --border-card-head: #E5E7EB;
+  --border-color: #E5E7EB;
+  --header-border: #ECECEC;
+
+  --text-sidebar: #6B7280;
+  --text-sidebar-active: var(--primary);
+  --text-primary: #111827;
+  --text-secondary: #4B5563;
+  --text-muted: #9CA3AF;
+
+  --input-bg: #FFFFFF;
+  --input-border: #D1D5DB;
+
+  --sidebar-active-bg: #EFF4FF;
+
+  /* Aliases used by Dashboard, Modal and other newer pages */
+  --bg-surface: var(--bg-card);
+  --border-card: var(--border-color);
+  --text-hint: var(--text-muted);
+  --shadow-card: 0 1px 4px rgba(0, 0, 0, 0.06);
+  --shadow-lift: 0 6px 18px rgba(0, 0, 0, 0.12);
+  --table-row-hover: #F3F6FF;
+
+  /* Focus ring + custom select chevron (dark arrow for light theme) */
+  --focus-ring: rgba(37, 99, 235, 0.18);
+  --select-arrow: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%236B7280' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+}
+
+.dark {
+  color-scheme: dark;
+  --primary: #3B82F6;
+  --secondary: #60A5FA;
+
+  --bg-base: #0E1117;
+  --bg-header: #11141B;
+  --bg-sidebar: #11141B;
+  --bg-card: #161B26;
+  --bg-card-head: #1B212E;
+  --border-card-head: #232A38;
+  --border-color: #232A38;
+  --header-border: #1E232E;
+
+  --text-sidebar: #9CA3AF;
+  --text-sidebar-active: #93BBFC;
+  --text-primary: #F3F4F6;
+  --text-secondary: #C2C6CC;
+  --text-muted: #7C8493;
+
+  --input-bg: #161B26;
+  --input-border: #2A313F;
+
+  --sidebar-active-bg: rgba(59, 130, 246, 0.14);
+
+  /* Aliases used by Dashboard, Modal and other newer pages */
+  --bg-surface: var(--bg-card);
+  --border-card: var(--border-color);
+  --text-hint: var(--text-muted);
+  --shadow-card: 0 1px 4px rgba(0, 0, 0, 0.45);
+  --shadow-lift: 0 10px 28px rgba(0, 0, 0, 0.55);
+  --table-row-hover: rgba(255, 255, 255, 0.04);
+
+  /* Focus ring + custom select chevron (light arrow for dark theme) */
+  --focus-ring: rgba(59, 130, 246, 0.28);
+  --select-arrow: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%239CA3AF' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+}
+
+body {
+  margin: 0;
+  font-family: theme('fontFamily.sans');
+  font-size: 13px;
+  background-color: var(--bg-base);
+  color: var(--text-primary);
+}
+
+/* Smooth crossfade when switching themes */
+body, header, aside, main, .card, .input, .btn-outline {
+  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+
+@layer components {
+  .btn { @apply inline-flex items-center gap-1.5 rounded-md px-4 py-2 text-xs font-bold transition active:scale-[.98] disabled:opacity-50; }
+  .btn-gold { @apply btn text-white hover:opacity-90; background-color: var(--primary); }
+  .btn-dark { @apply btn text-white hover:opacity-90; background-color: var(--secondary); }
+  .btn-green { @apply btn bg-ok text-white hover:opacity-90; }
+  .btn-red { @apply btn bg-danger text-white hover:opacity-90; }
+  .btn-blue { @apply btn text-white hover:opacity-90; background-color: var(--primary); }
+  .btn-outline {
+    @apply btn border;
+    background-color: var(--bg-card);
+    color: var(--text-primary);
+    border-color: var(--input-border);
+  }
+  .btn-outline:hover { background-color: var(--bg-card-head); }
+  .btn-sm { @apply px-2.5 py-1 text-[11px]; }
+
+  .field-label {
+    @apply text-[11px] font-bold uppercase tracking-wide mb-1 block;
+    color: var(--text-secondary);
+  }
+  .input {
+    @apply w-full rounded-md px-3 py-2 text-[13px] outline-none transition border;
+    background-color: var(--input-bg);
+    border-color: var(--input-border);
+    color: var(--text-primary);
+  }
+  .input:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px var(--focus-ring);
+  }
+  .input::placeholder { color: var(--text-muted); }
+
+  /* Native <select> built on .input: custom chevron + themed popup list */
+  select.input {
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    padding-right: 2rem;
+    background-image: var(--select-arrow);
+    background-repeat: no-repeat;
+    background-position: right 0.6rem center;
+    background-size: 1rem;
+    cursor: pointer;
+  }
+  /* The open option list — browsers fall back to these colors */
+  select.input option,
+  select.input optgroup {
+    background-color: var(--bg-card);
+    color: var(--text-primary);
+  }
+
+  .card {
+    @apply rounded-lg shadow-card overflow-hidden border;
+    background-color: var(--bg-card);
+    border-color: var(--border-color);
+  }
+  .card-head {
+    @apply px-4 py-2.5 flex items-center justify-between border-b;
+    background-color: var(--bg-card-head);
+    border-color: var(--border-card-head);
+  }
+  .card-head h2 { @apply text-xs font-bold uppercase tracking-wide; color: var(--text-primary); }
+  .card-body { @apply p-4; }
+
+  .status { @apply inline-block rounded-full px-2 py-0.5 text-[10px] font-bold uppercase; }
+}
+
+/* ── Dark-mode remaps for hardcoded brand utilities ───────────────────────
+   Many components use static Tailwind colors (text-navy, text-ink-*,
+   bg-white, bg-gold-pale, etc.) that were designed for the light theme and
+   become invisible / wrong on dark backgrounds. Remap them to theme vars
+   when .dark is active so every page stays readable without touching each
+   call site. */
+.dark .text-navy,
+.dark .text-navy-700,
+.dark .text-navy-800,
+.dark .text-navy-900,
+.dark .text-ink,
+.dark .text-ink-2 { color: var(--text-primary) !important; }
+
+.dark .text-ink-3 { color: var(--text-muted) !important; }
+
+/* Light surface boxes used inside cards (stat tiles, avatars, chips) */
+.dark .bg-white { background-color: var(--bg-card) !important; }
+.dark .bg-gray-50 { background-color: var(--bg-card-head) !important; }
+.dark .bg-gold-pale { background-color: rgba(59, 130, 246, 0.14) !important; }
+.dark .bg-gold-light { background-color: rgba(59, 130, 246, 0.22) !important; }
+
+/* Light borders that vanish or glare on dark */
+.dark .border-gray-100,
+.dark .border-gray-200,
+.dark .border-gray-300 { border-color: var(--border-color) !important; }
+
+/* Row hover on tables (was hover:bg-gold-pale -> too light on dark) */
+.dark .hover\:bg-gold-pale:hover { background-color: rgba(255, 255, 255, 0.04) !important; }
+
+/* Tinted callouts / chips used inside modals (warn, purple selections) */
+.dark .bg-warn-light { background-color: rgba(230, 81, 0, 0.16) !important; }
+.dark .bg-purple-50 { background-color: rgba(168, 85, 247, 0.16) !important; }
+.dark .text-purple-700 { color: #C4B5FD !important; }
+.dark .border-purple-200,
+.dark .border-purple-300 { border-color: rgba(168, 85, 247, 0.4) !important; }
