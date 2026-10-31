@@ -280,6 +280,24 @@ export const salesReport = asyncHandler(async(req, res) => {
     let revenue = 0,
         units = 0;
 
+    // Who made each order? Normally order.salesperson (+ a name snapshot). Older
+    // or imported orders can lack both, so fall back to the creator, then to the
+    // owner of the lead that was converted into the order (matched on orderNo).
+    const firstHist = (o) => (Array.isArray(o.statusHistory) && o.statusHistory[0]) || {};
+    // A saved name of "—", "-", "null" etc. is a placeholder, not a person.
+    const realName = (s) => {
+        const v = String(s == null ? '' : s).trim();
+        return /^(—|–|-|n\/a|null|undefined|unknown)?$/i.test(v) ? '' : v;
+    };
+    const orphanNos = orders
+        .filter((o) => !o.salesperson && !realName(o.salespersonName) && !o.createdBy && !firstHist(o).by && !realName(firstHist(o).byName))
+        .map((o) => o.orderNo);
+    const leadOwnerByOrderNo = new Map();
+    if (orphanNos.length) {
+        const owners = await Lead.find({...t, orderNo: { $in: orphanNos } }).select('orderNo owner ownerName').lean();
+        owners.forEach((l) => leadOwnerByOrderNo.set(l.orderNo, l));
+    }
+
     orders.forEach((o) => {
         revenue += o.grandTotal;
         const u = o.items.reduce((s, it) => s + it.qty, 0);
@@ -289,15 +307,23 @@ export const salesReport = asyncHandler(async(req, res) => {
         // and goes stale if the user's name/username is changed later, which
         // used to split one person into two separate rows in this panel
         // (same issue as the Top Employees widget above).
-        const key = String(o.salesperson || 'unknown');
+        let rawId = o.salesperson || null;
+        let rawName = realName(o.salespersonName);
+        if (!rawId && !rawName) {                       // creator is the next best owner
+            const h = firstHist(o);
+            rawId = o.createdBy || h.by || null;
+            rawName = realName(h.byName);
+        }
+        if (!rawId && !rawName) {                       // then the converted lead's owner
+            const lo = leadOwnerByOrderNo.get(o.orderNo);
+            if (lo) { rawId = lo.owner || null; rawName = realName(lo.ownerName); }
+        }
+        const key = rawId ? String(rawId) : (rawName ? `name:${rawName}` : 'unknown');
         if (!bySalespersonMap[key]) bySalespersonMap[key] = { orders: 0, revenue: 0, snapshotName: '' };
         bySalespersonMap[key].orders += 1;
         bySalespersonMap[key].revenue += o.grandTotal;
-        // Keep the snapshot name as a fallback for deleted users / orders
-        // whose salesperson id no longer resolves.
-        if (!bySalespersonMap[key].snapshotName && o.salespersonName) {
-            bySalespersonMap[key].snapshotName = o.salespersonName;
-        }
+        // Snapshot name = fallback for deleted users / ids that no longer resolve.
+        if (!bySalespersonMap[key].snapshotName && rawName) bySalespersonMap[key].snapshotName = rawName;
         byCountry[o.country] = (byCountry[o.country] || 0) + o.grandTotal;
         byStatus[o.status] = (byStatus[o.status] || 0) + 1;
     });
@@ -306,11 +332,13 @@ export const salesReport = asyncHandler(async(req, res) => {
     // name/username change can't split them into two rows.
     const spIds = Object.keys(bySalespersonMap).filter((k) => /^[0-9a-fA-F]{24}$/.test(k));
     const spUsers = spIds.length ?
-        await User.find({ _id: { $in: spIds }, ...t }).select('name').lean() : [];
+        await User.find({ _id: { $in: spIds } }).select('name').lean() : [];
     const spNameById = new Map(spUsers.map((u) => [String(u._id), u.name]));
     const bySalesperson = {};
     Object.entries(bySalespersonMap).forEach(([key, val]) => {
-        const name = (key !== 'unknown' && spNameById.get(key)) || val.snapshotName || '—';
+        // Current user name → saved snapshot → a legacy plain-text value → "Unassigned".
+        const legacyText = key !== 'unknown' && !key.startsWith('name:') && !/^[0-9a-fA-F]{24}$/.test(key) ? key : '';
+        const name = (key !== 'unknown' && spNameById.get(key)) || val.snapshotName || legacyText || 'Unassigned';
         bySalesperson[name] = bySalesperson[name] || { orders: 0, revenue: 0 };
         bySalesperson[name].orders += val.orders;
         bySalesperson[name].revenue += val.revenue;
@@ -332,6 +360,7 @@ export const salesReport = asyncHandler(async(req, res) => {
         bySalesperson,
         byCountry,
         byStatus,
+        build: 'sales-report-v3',   // lets the Reports page detect an outdated backend
     });
 });
 
@@ -654,7 +683,20 @@ export const monthlyComparison = asyncHandler(async (req, res) => {
         createdAt: { $gte: months[0].start, $lte: months[months.length - 1].end },
     }).select('status converted createdAt').lean();
 
+    // Orders & revenue per month (by order date) so the comparison covers sales,
+    // not just lead stages.
+    const orderRows = await Order.find({
+        ...scope,
+        date: { $gte: months[0].start, $lte: months[months.length - 1].end },
+    }).select('date grandTotal').lean();
+
     const result = months.map(({ key, label, start, end }) => {
+        const monthOrders = orderRows.filter((o) => {
+            const ts = new Date(o.date).getTime();
+            return ts >= start.getTime() && ts <= end.getTime();
+        });
+        const orders = monthOrders.length;
+        const revenue = Number(monthOrders.reduce((s, o) => s + (o.grandTotal || 0), 0).toFixed(2));
         const monthLeads = leads.filter(l => {
             const t = new Date(l.createdAt).getTime();
             return t >= start.getTime() && t <= end.getTime();
@@ -663,7 +705,7 @@ export const monthlyComparison = asyncHandler(async (req, res) => {
         const opportunity = monthLeads.filter(l => l.status === 'Interested' || l.status === 'Contacted').length;
         const enquiry     = monthLeads.filter(l => l.status === 'Follow-up').length;
         const newLeads    = monthLeads.filter(l => l.status === 'New').length;
-        return { key, label, buyers, opportunity, enquiry, newLeads, total: monthLeads.length };
+        return { key, label, buyers, opportunity, enquiry, newLeads, total: monthLeads.length, orders, revenue };
     });
 
     res.json({ success: true, months: result });
