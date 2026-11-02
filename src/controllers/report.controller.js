@@ -6,14 +6,27 @@ import { Attendance } from '../models/Attendance.js';
 import { AttendanceConfig } from '../models/AttendanceConfig.js';
 import { User } from '../models/User.js';
 import { tenantScope, tenantCompanyId } from '../middleware/auth.js';
+import { statusAsOf, wonDates } from '../utils/leadStatusAt.js';
 
-// A lead counts as a "buyer"/conversion once it is marked Won OR has been
-// converted into an order. convertLead sets BOTH, but a lead can also be marked
-// Won manually (without an order), so both conditions must be checked. Using
-// only `converted` (as the dashboard previously did) made the Buyers stat and
-// the Buyers-over-time chart under-report and disagree with the Won status
-// count / pipeline on the same page. This is the single source of truth.
-const isBuyer = (l) => l.status === 'Won' || l.converted === true;
+// A lead is a "buyer" while its status is Won. The monthly reset moves last
+// month's Buyers back to Opportunity, so this means "buyer in the CURRENT
+// month". `converted` (= has an order, ever) must NOT count here — it never
+// resets, which used to keep last month's customers in this month's Buyers.
+// For a past date, pass leads through withStatusAsOf() first so `status` is
+// what it was on that date. This is the single source of truth.
+const isBuyer = (l) => l.status === 'Won';
+
+// Copy of each lead whose `status` is the one it had at the end of `until`.
+// Leads that didn't exist yet are dropped.
+const withStatusAsOf = (leads, until) =>
+    leads
+    .map((l) => {
+        const st = statusAsOf(l, until);
+        if (st === null) return null;
+        const o = typeof l.toObject === 'function' ? l.toObject() : l;
+        return {...o, status: st };
+    })
+    .filter(Boolean);
 
 const buildRange = (period, from, to) => {
     const now = new Date();
@@ -167,10 +180,15 @@ export const dashboard = asyncHandler(async(req, res) => {
     leads.forEach((l) => {
         const created = idx[keyOf(l.createdAt)];
         if (created !== undefined) newSeries[created] += 1;
-        if (isBuyer(l)) {
-            const conv = idx[keyOf(l.updatedAt)];
+        // Bucket by when the lead actually became a Buyer (Won events in its
+        // history), so past months keep their buyers after the monthly reset.
+        // Legacy leads with no logged Won event fall back to updatedAt.
+        const won = wonDates(l);
+        const when = won.length ? won : (isBuyer(l) ? [l.updatedAt] : []);
+        when.forEach((d) => {
+            const conv = idx[keyOf(d)];
             if (conv !== undefined) convSeries[conv] += 1;
-        }
+        });
     });
     const leadsOverTime = buckets.map((b, i) => ({ label: b.label, date: b.key, newLeads: newSeries[i], converted: convSeries[i] }));
 
@@ -384,7 +402,7 @@ export const dailyReport = asyncHandler(async(req, res) => {
     prevEnd.setDate(prevEnd.getDate() - 1);
     const dateKey = dayKey(start);
 
-    const [dayLeads, prevLeads, allOpen, dayOrders, dayInvoices, attendanceUsers, attendanceRecords] = await Promise.all([
+    const [dayLeadsRaw, prevLeadsRaw, allOpen, dayOrders, dayInvoices, attendanceUsers, attendanceRecords] = await Promise.all([
         Lead.find({...scope, createdAt: { $gte: start, $lte: end } }).sort({ createdAt: -1 }).lean(),
         Lead.find({...scope, createdAt: { $gte: prevStart, $lte: prevEnd } }).lean(),
         // Open follow-ups: scheduled, not yet Won/Lost.
@@ -418,6 +436,12 @@ export const dailyReport = asyncHandler(async(req, res) => {
             date: dateKey,
         }).lean(),
     ]);
+
+    // Statuses as they were at the end of the selected day (and the day before),
+    // not today's — otherwise a report for a past day changes after the monthly
+    // Buyer → Opportunity reset.
+    const dayLeads = withStatusAsOf(dayLeadsRaw, end);
+    const prevLeads = withStatusAsOf(prevLeadsRaw, prevEnd);
 
     // Map real lead statuses → report display buckets.
     const isContacted = (s) => ['Contacted', 'Interested', 'Follow-up', 'Won'].includes(s);
@@ -681,7 +705,7 @@ export const monthlyComparison = asyncHandler(async (req, res) => {
     const leads = await Lead.find({
         ...scope,
         createdAt: { $gte: months[0].start, $lte: months[months.length - 1].end },
-    }).select('status converted createdAt').lean();
+    }).select('status createdAt editHistory.at editHistory.changes').lean();
 
     // Orders & revenue per month (by order date) so the comparison covers sales,
     // not just lead stages.
@@ -697,11 +721,14 @@ export const monthlyComparison = asyncHandler(async (req, res) => {
         });
         const orders = monthOrders.length;
         const revenue = Number(monthOrders.reduce((s, o) => s + (o.grandTotal || 0), 0).toFixed(2));
-        const monthLeads = leads.filter(l => {
+        // Leads created this month, with the stage they had at the END of that
+        // month (the current month uses today's status). Without this, last
+        // month's Buyers all collapsed into Opportunity after the monthly reset.
+        const monthLeads = withStatusAsOf(leads.filter(l => {
             const t = new Date(l.createdAt).getTime();
             return t >= start.getTime() && t <= end.getTime();
-        });
-        const buyers      = monthLeads.filter(l => l.status === 'Won' || l.converted).length;
+        }), end);
+        const buyers      = monthLeads.filter(l => l.status === 'Won').length;
         const opportunity = monthLeads.filter(l => l.status === 'Interested' || l.status === 'Contacted').length;
         const enquiry     = monthLeads.filter(l => l.status === 'Follow-up').length;
         const newLeads    = monthLeads.filter(l => l.status === 'New').length;

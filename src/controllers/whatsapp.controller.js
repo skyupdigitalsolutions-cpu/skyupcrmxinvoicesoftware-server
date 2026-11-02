@@ -745,7 +745,7 @@ export const webhook = asyncHandler(async (req, res) => {
                             lead.editHistory.push({
                                 by: lead.owner,
                                 byName: 'WhatsApp (auto)',
-                                changes: [{ field: 'status', from: 'New', to: 'Contacted — replied on WhatsApp' }],
+                                changes: [{ field: 'status', from: 'New', to: 'Contacted' }],
                             });
                         }
                         await lead.save();

@@ -1,13 +1,10 @@
 /**
  * monthlyStageResetScheduler.js
  *
- * On the 1st of every month (at 00:05 server time), resets all leads whose
- * status is 'Won' but have NOT been converted into an order back to
- * 'Interested' — moving them from the Buyer stage back to Opportunity.
- *
- * Leads that ARE converted (i.e. have an actual order via convertLead) are
- * left untouched — they are real buyers with an order record and should
- * remain Won permanently.
+ * From the start of every month, resets every lead that is still 'Won' from a
+ * PREVIOUS month back to 'Interested' — Buyer → Opportunity. Reports for past
+ * dates still show them as Buyers because the change is recorded in editHistory
+ * (see utils/leadStatusAt.js).
  *
  * This automation is what causes the "Buyer → Opportunity" monthly reset
  * the sales team expects at the start of each month.
@@ -34,9 +31,6 @@ import mongoose from 'mongoose';
 import { Lead } from '../models/Lead.js';
 import { Company } from '../models/Company.js';
 import { notifyUsers, adminsOf } from './notify.js';
-
-// Returns true if today is the 1st day of the month (server local time).
-const isFirstOfMonth = () => new Date().getDate() === 1;
 
 // Returns today as YYYY-MM-DD (server local time).
 const todayStr = () => new Date().toISOString().slice(0, 10);
@@ -68,11 +62,17 @@ async function fixNullEditHistoryBy() {
 }
 
 // ── Monthly reset tick ───────────────────────────────────────────────────────
-async function tick() {
-    if (!isFirstOfMonth()) return;
-
+export async function tick() {
+    // Start of the current month (server local time). Any Buyer whose last
+    // update is BEFORE this moment is a previous-month Buyer and gets reset.
+    // This replaces the old "only run if today is the 1st" gate, so a server
+    // that was down or redeployed on the 1st still catches up on the next
+    // hourly tick, while a customer who buys this month (updatedAt >= monthStart)
+    // is never reset early. The query is idempotent.
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
     const today = todayStr();
-    console.log(`[monthlyReset] Running monthly Buyer → Opportunity reset for ${today}`);
+    console.log(`[monthlyReset] Checking Buyer → Opportunity reset for ${today} (cut-off ${monthStart.toISOString()})`);
 
     // Get all active companies.
     const companies = await Company.find({ active: true }).select('_id name').lean();
@@ -81,19 +81,17 @@ async function tick() {
 
     for (const company of companies) {
         try {
-            // Find leads that are:
-            // - status 'Won' (showing as Buyer stage)
-            // - NOT converted into an order (converted: false or undefined)
-            //   Converted leads have a real order and must stay as Buyers.
+            // Find leads that are still 'Won' (Buyer) from a PREVIOUS month —
+            // converted or not (see the query below).
             const result = await Lead.updateMany(
                 {
                     company: company._id,
                     status: 'Won',
-                    // ALL Buyers reset to Opportunity every month — including
-                    // converted leads. The Buyer stage resets monthly for
-                    // the sales pipeline; re-ordering keeps them converted=true
-                    // which means a new order form will instantly mark them
-                    // Buyer again.
+                    // Only Buyers from BEFORE this month. Anyone who bought
+                    // (or was touched) since the 1st stays a Buyer until the
+                    // next month. `converted` is left as-is on purpose — it
+                    // means "has an order", not "is a Buyer this month".
+                    updatedAt: { $lt: monthStart },
                 },
                 {
                     $set: { status: 'Interested', monthlyReset: true },
@@ -110,7 +108,9 @@ async function tick() {
                             changes: [{
                                 field: 'status',
                                 from: 'Won',
-                                to: 'Interested — all Buyers reset to Opportunity monthly',
+                                // Must be a real status value: reports replay editHistory
+                                // to find a lead's stage on a past date (utils/leadStatusAt.js).
+                                to: 'Interested',
                             }],
                         },
                     },
@@ -156,11 +156,11 @@ export function startMonthlyStageResetScheduler() {
         );
     }, 5_000);
 
-    // Check every hour whether it's the 1st of the month.
+    // Check every hour. The tick is cheap and idempotent (see monthStart above).
     // Staggered 20s after startup so DB is fully ready.
     // The tick itself is idempotent — once leads are reset to 'Interested'
-    // they no longer match the Won + !converted query, so repeated runs
-    // within the same day are safe.
+    // they no longer match the Won + updatedAt < monthStart query, so repeated
+    // runs are safe.
     setTimeout(() => {
         tick().catch((e) => console.error('[monthlyReset] tick error:', e));
         setInterval(

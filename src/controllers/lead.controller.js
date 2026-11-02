@@ -11,6 +11,7 @@ import { notifyUsers, adminsOf } from '../utils/notify.js';
 import { Cheque } from '../models/Cheque.js';
 import { WhatsAppMessage } from '../models/WhatsAppMessage.js';
 import { Notification } from '../models/Notification.js';
+import { applyAsOf } from '../utils/leadStatusAt.js';
 
 // Human-readable labels for the fields we track edits on — used both in the
 // stored history and the admin notification text.
@@ -147,6 +148,19 @@ export const listLeads = asyncHandler(async(req, res) => {
         callLogs: { $slice: -1 },   // last call only
         // editHistory: admin gets it on detail page, skip on list
     };
+
+    // ?asOf=YYYY-MM-DD[&from=YYYY-MM-DD][&tz=<Date#getTimezoneOffset>]
+    // Returns each lead with the status it HAD at the end of `asOf` (so a
+    // customer who bought on the 30th is a Buyer in the 30th's report even
+    // though the monthly reset turned them into an Opportunity on the 1st).
+    // editHistory is used server-side only and never sent to the browser, so
+    // this works for sales users too.
+    if (req.query.asOf) {
+        const withHist = {...projection, 'editHistory.at': 1, 'editHistory.changes': 1 };
+        const raw = await Lead.find(q, withHist).sort({ createdAt: -1 }).lean();
+        const leads = applyAsOf(raw, { asOf: req.query.asOf, from: req.query.from, tz: req.query.tz });
+        return res.json({ success: true, leads });
+    }
 
     // Admin gets editHistory only when explicitly requested (?with=editHistory)
     if (req.user.role === 'admin' && req.query.with === 'editHistory') {
@@ -866,9 +880,19 @@ export const convertLead = asyncHandler(async(req, res) => {
     order.recalc();
     await order.save();
 
+    const prevStatus = lead.status;
     lead.converted = true;
     lead.orderNo = orderNo;
     lead.status = 'Won';
+    if (prevStatus !== 'Won') {
+        // Log it so reports can tell when this customer became a Buyer.
+        lead.editHistory.push({
+            by: req.user._id,
+            byName: req.user.name,
+            at: new Date(),
+            changes: [{ field: 'status', from: prevStatus, to: 'Won' }],
+        });
+    }
     await lead.save();
 
     res.json({ success: true, lead, order });

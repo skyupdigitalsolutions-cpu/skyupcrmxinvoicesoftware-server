@@ -21,6 +21,7 @@ import { env } from '../config/env.js';
 import PDFDocument from 'pdfkit';
 import { Lead, displayPhone } from '../models/Lead.js';
 import { Order } from '../models/Order.js';
+import { statusAsOf } from './leadStatusAt.js';
 
 // ── helpers ────────────────────────────────────────────────────────────────────
 const dayKey = (d) => {
@@ -166,18 +167,24 @@ async function fetchReportData(companyId, date) {
     const end = new Date(date);
     end.setHours(23, 59, 59, 999);
 
-    const [dayLeads, allOpenLeads, dayOrders] = await Promise.all([
+    const [dayLeadsRaw, allOpenLeads, dayOrders] = await Promise.all([
         Lead.find({ company: companyId, createdAt: { $gte: start, $lte: end } }).sort({ createdAt: -1 }).lean(),
         Lead.find({ company: companyId, followUpAt: { $ne: null }, status: { $nin: ['Won', 'Lost'] } }).lean(),
         Order.find({ company: companyId, createdAt: { $gte: start, $lte: end } }).lean(),
     ]);
+
+    // Status each lead had at the END of the report day (not today's), so a
+    // report for a past day doesn't change after the monthly Buyer → Opportunity reset.
+    const dayLeads = dayLeadsRaw
+        .map((l) => ({...l, status: statusAsOf(l, end) }))
+        .filter((l) => l.status !== null);
 
     const isContacted = (s) => ['Contacted', 'Interested', 'Follow-up', 'Won'].includes(s);
     const isInProgress = (s) => ['Contacted', 'Interested', 'Follow-up'].includes(s);
     const count = (arr, pred) => arr.filter(pred).length;
 
     const total = dayLeads.length;
-    const converted = count(dayLeads, (l) => l.status === 'Won' || l.converted);
+    const converted = count(dayLeads, (l) => l.status === 'Won');
     const contacted = count(dayLeads, (l) => isContacted(l.status));
     const inProgress = count(dayLeads, (l) => isInProgress(l.status));
     const callsToday = dayLeads.reduce(
@@ -195,7 +202,7 @@ async function fetchReportData(companyId, date) {
         empMap[name].leads += 1;
         empMap[name].callsToday += (l.callLogs || []).filter((c) => new Date(c.at) >= start && new Date(c.at) <= end).length;
         if (isInProgress(l.status)) empMap[name].inProgress += 1;
-        if (l.status === 'Won' || l.converted) empMap[name].converted += 1;
+        if (l.status === 'Won') empMap[name].converted += 1;
     });
     const employees = Object.values(empMap).sort((a, b) => b.leads - a.leads);
 

@@ -69,12 +69,21 @@ export default function Reports() {
   const { isAdmin, user } = useAuth();
   const { show } = useToast();
 
-  const { data: leads, loading: leadsLoading, refetch: refetchLeads } = useFetch(() => leadApi.list(), []);
   const { data: monthlyData, loading: monthlyLoading } = useFetch(
     () => activeTab === 'monthly' ? reportApi.monthlyComparison() : Promise.resolve(null),
     [activeTab]
   );
   const [query, setQuery] = useState({ period: 'month' });
+  // Lead statuses as they were at the END of the selected period (server-side,
+  // from the lead's status history) so past periods keep their Buyers after the
+  // monthly Buyer → Opportunity reset.
+  const bounds = getPeriodBounds(query);
+  const { data: leads, loading: leadsLoading, refetch: refetchLeads } = useFetch(
+    () => leadApi.list(bounds.to || bounds.from
+      ? { asOf: bounds.to || bounds.from, from: bounds.from, tz: new Date().getTimezoneOffset() }
+      : undefined),
+    [bounds.from, bounds.to]
+  );
   const { data: sales, loading: salesLoading } = useFetch(() => reportApi.sales(query), [JSON.stringify(query)]);
   // Lazy-loaded on export only — avoids fetching thousands of records on page load
   const [allOrders, setAllOrders] = useState(null);
@@ -130,7 +139,7 @@ export default function Reports() {
         if (!byId && !byName) return false;
       }
       if (ctry && l.country !== ctry) return false;
-      if (from || to) return inRange(l.createdAt, from, to);
+      if (from || to) return inRange(l.createdAt, from, to) || !!l.buyerActivityInRange;
       return true;
     });
   }, [allLeads, employeeName, query.employee, query.country, query.period, query.from, query.to]);
@@ -150,7 +159,7 @@ export default function Reports() {
   const paged = filtered.slice((safePage - 1) * PER_PAGE, safePage * PER_PAGE);
 
   // ── Lead-side aggregates (scoped to the shared filter bar) ────────────────
-  const won = sharedFiltered.filter((l) => l.status === 'Won' || l.converted).length;
+  const won = sharedFiltered.filter((l) => l.status === 'Won').length;
   const convRate = sharedFiltered.length ? Math.round((won / sharedFiltered.length) * 100) : 0;
   const byOwner = useMemo(() => {
     const m = {};
@@ -158,7 +167,7 @@ export default function Reports() {
       const n = l.ownerName || 'Unassigned';
       m[n] = m[n] || { name: n, leads: 0, won: 0 };
       m[n].leads += 1;
-      if (l.status === 'Won' || l.converted) m[n].won += 1;
+      if (l.status === 'Won') m[n].won += 1;
     });
     return Object.values(m).sort((a, b) => b.leads - a.leads);
   }, [sharedFiltered]);

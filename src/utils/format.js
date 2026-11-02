@@ -314,7 +314,10 @@ export const leadStatusClass = (s) => ({
 export const LEAD_STAGES = ['Lead', 'Opportunity', 'Enquiry', 'Buyer'];
 
 export const leadStageOf = (l) => {
-    if (l.converted || l.status === 'Won') return 'Buyer';
+    // Buyer = status Won only. `converted` (has an order, ever) never resets, so
+    // using it here kept customers on "Buyer" after the monthly Buyer →
+    // Opportunity reset.
+    if (l.status === 'Won') return 'Buyer';
     if (l.status === 'Follow-up') return 'Enquiry';
     if (l.status === 'Interested' || l.status === 'Contacted') return 'Opportunity';
     return 'Lead'; // New / Lost / anything else

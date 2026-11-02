@@ -272,32 +272,10 @@ function DuplicateGroup({ group, onMerged }) {
 }
 
 
-// ── Reconstruct lead status/stage at a given date using editHistory ───────────
-// Replays the editHistory backwards to find what 'status' was on targetDate.
-// Falls back to current status if no history or lead didn't exist yet.
-function statusAtDate(lead, targetDate) {
-  if (!targetDate) return lead.status;
-  const target = new Date(targetDate + 'T23:59:59');
-  const history = lead.editHistory || [];
-  // Sort history oldest-first
-  const sorted = [...history].sort((a, b) => new Date(a.at) - new Date(b.at));
-  // Start from the lead's initial status (before any edits) — which we derive
-  // by rewinding: find the first status change and take its 'from' value,
-  // or use current status if no status change exists.
-  let statusChanges = sorted
-    .flatMap(h => (h.changes || []).filter(ch => ch.field === 'status').map(ch => ({ at: h.at, from: ch.from, to: ch.to })));
-
-  if (!statusChanges.length) return lead.status; // no history, use current
-
-  // The initial status is the 'from' of the first change
-  let statusOnDate = statusChanges[0].from || 'New';
-  // Apply each change that happened ON or BEFORE the target date
-  for (const ch of statusChanges) {
-    if (new Date(ch.at) <= target) statusOnDate = ch.to;
-    else break;
-  }
-  return statusOnDate || lead.status;
-}
+// NOTE: when a date filter is active the server returns every lead's status AS
+// IT WAS on the end date (GET /leads?asOf=…), so `l.status` is already the
+// as-of status. (The old client-side editHistory replay never worked: the list
+// endpoint does not send editHistory.)
 
 
 // ── Reusable multi-select dropdown ───────────────────────────────────────────
@@ -390,8 +368,6 @@ export default function Leads() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { isAdmin, user } = useAuth();
   const { show } = useToast();
-  const { data: leads, loading, refetch } = useFetch(() => leadApi.list(), []);
-
   const [f, setF] = useState({
     search:   searchParams.get('search')   || '',
     status:   searchParams.get('status')   ? searchParams.get('status').split(',')   : [],
@@ -403,6 +379,17 @@ export default function Leads() {
     dateFrom: searchParams.get('dateFrom') || '',
     dateTo:   searchParams.get('dateTo')   || '',
   });
+
+  // With a date filter, ask the server for each lead's status on the end date
+  // (so a customer who bought on the 30th shows as Buyer in the 30th's report
+  // and as Opportunity in next month's, after the monthly reset).
+  const asOfKey = `${f.dateFrom}|${f.dateTo}`;
+  const { data: leads, loading, refetch } = useFetch(() => {
+    const asOf = f.dateTo || f.dateFrom;
+    return leadApi.list(asOf
+      ? { asOf, from: f.dateFrom || undefined, tz: new Date().getTimezoneOffset() }
+      : undefined);
+  }, [asOfKey]);
 
   // Sync every filter change into the URL so browser Back restores it exactly.
   const updateFilter = (patch) => {
@@ -468,20 +455,21 @@ export default function Leads() {
   const filtered = useMemo(() => {
     if (!leads) return [];
     return leads.filter((l) => {
-      // When date filter is active, compare against the status the lead HAD on that date
-      const effectiveStatus = (f.dateFrom || f.dateTo)
-        ? statusAtDate(l, f.dateTo || f.dateFrom)
-        : l.status;
+      // With a date filter the server already returned the status the lead HAD on that date.
+      const effectiveStatus = l.status;
       if (f.status.length   && !f.status.includes(effectiveStatus)) return false;
       if (f.source.length   && !f.source.includes(l.source || '')) return false;
-      if (f.stage.length    && !f.stage.includes(leadStageOf({ ...l, status: effectiveStatus }))) return false;
+      if (f.stage.length    && !f.stage.includes(leadStageOf(l))) return false;
       if (f.country.length  && !f.country.map(x=>x.toLowerCase()).includes((l.country||'').trim().toLowerCase())) return false;
       if (f.campaign.length && !f.campaign.includes(l.campaign || '')) return false;
       if (f.employee.length && !f.employee.includes(String(l.owner))) return false;
       if (f.dateFrom || f.dateTo) {
+        // Created inside the range, OR became / stopped being a Buyer inside it
+        // (e.g. bought on the 30th, reset to Opportunity on the 1st).
         const d = new Date(l.createdAt);
-        if (f.dateFrom && d < new Date(f.dateFrom + 'T00:00:00')) return false;
-        if (f.dateTo   && d > new Date(f.dateTo   + 'T23:59:59')) return false;
+        const createdIn = !((f.dateFrom && d < new Date(f.dateFrom + 'T00:00:00')) ||
+                            (f.dateTo   && d > new Date(f.dateTo   + 'T23:59:59')));
+        if (!createdIn && !l.buyerActivityInRange) return false;
       }
       if (f.search) {
         const q = f.search.toLowerCase();
@@ -587,7 +575,7 @@ export default function Leads() {
           l.country || '—',
           l.ownerName || '—',
           leadStageOf(l),
-          (f.dateFrom || f.dateTo) ? statusAtDate(l, f.dateTo || f.dateFrom) : l.status,
+          l.status,
           l.remark || '—',
           notesText,
           l.orderNo ? `#${l.orderNo}` : '—',
@@ -613,18 +601,11 @@ export default function Leads() {
     // KPIs reflect the currently filtered leads, not all leads
     const list = filtered;
     const total = list.length;
-    const enquiry = list.filter((l) => {
-      const st = (f.dateFrom || f.dateTo) ? statusAtDate(l, f.dateTo || f.dateFrom) : l.status;
-      return leadStageOf({ ...l, status: st }) === 'Enquiry';
-    }).length;
-    const opportunity = list.filter((l) => {
-      const st = (f.dateFrom || f.dateTo) ? statusAtDate(l, f.dateTo || f.dateFrom) : l.status;
-      return leadStageOf({ ...l, status: st }) === 'Opportunity';
-    }).length;
-    const converted = list.filter((l) => {
-      const st = (f.dateFrom || f.dateTo) ? statusAtDate(l, f.dateTo || f.dateFrom) : l.status;
-      return st === 'Won' || l.converted;
-    }).length;
+    // `l.status` is already the as-of status when a date filter is active.
+    // `converted` (has an order, ever) is NOT a Buyer signal — it never resets.
+    const enquiry = list.filter((l) => leadStageOf(l) === 'Enquiry').length;
+    const opportunity = list.filter((l) => leadStageOf(l) === 'Opportunity').length;
+    const converted = list.filter((l) => l.status === 'Won').length;
     return {
       total,
       enquiry,
@@ -945,25 +926,15 @@ export default function Leads() {
                     <td className="px-2.5 py-2 text-xs">{l.ownerName || '—'}</td>
                     <td className="px-2.5 py-2 text-xs whitespace-nowrap">{l.country || '—'}</td>
                     <td className="px-2.5 py-2">
-                      {(() => {
-                        const effStatus = (f.dateFrom || f.dateTo) ? statusAtDate(l, f.dateTo || f.dateFrom) : l.status;
-                        const effL = { ...l, status: effStatus };
-                        return <span className={`status ${leadStageClass(leadStageOf(effL), effL)}`}>{leadStageOf(effL)}</span>;
-                      })()}
+                      <span className={`status ${leadStageClass(leadStageOf(l), l)}`}>{leadStageOf(l)}</span>
                     </td>
                     <td className="px-2.5 py-2">
-                      {(f.dateFrom || f.dateTo) && (() => {
-                        const hist = statusAtDate(l, f.dateTo || f.dateFrom);
-                        return hist !== l.status ? (
-                          <div className="flex flex-col gap-0.5">
-                            <span className={`status ${leadStatusClass(hist)}`} title={`Status on ${f.dateTo || f.dateFrom}`}>{hist}</span>
-                            <span className="text-[10px] text-ink-3">now: {l.status}</span>
-                          </div>
-                        ) : (
-                          <span className={`status ${leadStatusClass(hist)}`}>{hist}</span>
-                        );
-                      })()}
-                      {!(f.dateFrom || f.dateTo) && (
+                      {(f.dateFrom || f.dateTo) && l.currentStatus && l.currentStatus !== l.status ? (
+                        <div className="flex flex-col gap-0.5">
+                          <span className={`status ${leadStatusClass(l.status)}`} title={`Status on ${f.dateTo || f.dateFrom}`}>{l.status}</span>
+                          <span className="text-[10px] text-ink-3">now: {l.currentStatus}</span>
+                        </div>
+                      ) : (
                         <span className={`status ${leadStatusClass(l.status)}`}>{l.status}</span>
                       )}
                     </td>
