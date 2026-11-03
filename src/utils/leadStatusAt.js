@@ -17,7 +17,7 @@
  *    status ("Interested" / "Contacted").
  *  - A lead created after D did not exist on D → status is null.
  */
-import { LEAD_STATUSES } from '../models/Lead.js';
+import { LEAD_STATUSES, normalizePhone } from '../models/Lead.js';
 
 // "Interested — all Buyers reset…" → "Interested". Unknown values → null.
 export function normalizeStatus(v) {
@@ -66,6 +66,47 @@ export function buyerChangedBetween(lead, start, end) {
     return statusTimeline(lead).some((c) => c.at >= start && c.at <= end && (c.to === 'Won' || c.from === 'Won'));
 }
 
+// Did the lead move INTO Won (a purchase) inside [start, end]? Unlike
+// buyerChangedBetween this ignores Won → X resets, so it answers "did this
+// customer buy during the period?".
+export function becameBuyerBetween(lead, start, end) {
+    return statusTimeline(lead).some((c) => c.at >= start && c.at <= end && c.to === 'Won' && c.from !== 'Won');
+}
+
+/**
+ * Orders are the strongest "this customer bought" signal. A lead's Won event is
+ * stamped when the order FORM is saved (and the browser call that does it is
+ * fire-and-forget), whereas the Orders / Sales reports filter on the order's own
+ * date — so the two could disagree about who bought in a period. These helpers let
+ * a date-range lead list also treat "has a non-cancelled order dated in the range"
+ * as a purchase in that range.
+ *
+ * `orders`: [{ orderNo, mobile, country, salesperson }] already restricted to the
+ * range and to non-cancelled orders by the caller.
+ */
+const last9 = (k) => { const d = String(k || '').replace(/\D/g, ''); return d.length >= 9 ? d.slice(-9) : ''; };
+
+export function indexBuyerOrders(orders) {
+    const byNo = new Map(), byKey = new Map(), byTail = new Map();
+    const add = (m, k, o) => { if (!k) return; if (!m.has(k)) m.set(k, []); m.get(k).push(o); };
+    for (const o of orders || []) {
+        const key = normalizePhone(o.mobile, o.country);
+        add(byNo, o.orderNo, o);
+        add(byKey, key, o);
+        add(byTail, last9(key), o);   // tolerates legacy leads stored with a wrong dial code
+    }
+    return { byNo, byKey, byTail };
+}
+
+export function ordersForLead(lead, idx) {
+    if (!idx) return [];
+    const hit = new Set();
+    (idx.byNo.get(lead.orderNo) || []).forEach((o) => hit.add(o));
+    (idx.byKey.get(lead.mobileKey) || []).forEach((o) => hit.add(o));
+    (idx.byTail.get(last9(lead.mobileKey)) || []).forEach((o) => hit.add(o));
+    return [...hit];
+}
+
 // 'YYYY-MM-DD' + client tz offset (minutes, = Date#getTimezoneOffset) → UTC Date.
 export function dayBoundary(dateStr, tzOffsetMin = 0, end = false) {
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr || ''));
@@ -78,23 +119,47 @@ export function dayBoundary(dateStr, tzOffsetMin = 0, end = false) {
  * Turn raw leads (with editHistory) into the list payload "as of" a date.
  *  - `status` becomes the as-of status (live one kept as `currentStatus`)
  *  - leads that didn't exist yet are dropped
+ *  - when a [from, asOf] range is given, a lead that BOUGHT (→ Won) inside the range is
+ *    reported as Won even if the monthly reset has since moved it back to Opportunity,
+ *    so a range report's Buyers count / Buyer stage filter includes everyone who
+ *    bought in that period (`boughtInRange` flags these, `statusAtEnd` keeps the raw as-of status)
  *  - `buyerActivityInRange` marks leads that became/stopped being a Buyer inside [from, asOf]
  *  - editHistory is stripped (admin-only data never reaches the browser)
  */
-export function applyAsOf(leads, { asOf, from, tz = 0 }) {
+export function applyAsOf(leads, { asOf, from, tz = 0, orders = null }) {
     const end = dayBoundary(asOf, tz, true);
     if (!end) return leads;
     const start = from ? dayBoundary(from, tz, false) : null;
+    const orderIdx = start && orders && orders.length ? indexBuyerOrders(orders) : null;
     const out = [];
     for (const l of leads) {
-        const st = statusAsOf(l, end);
-        if (st === null) continue;
+        const statusAtEnd = statusAsOf(l, end);
+        if (statusAtEnd === null) continue;
+        let st = statusAtEnd;
+        let boughtInRange = false;
+        if (start && st !== 'Won' && becameBuyerBetween(l, start, end)) {
+            st = 'Won';
+            boughtInRange = true;
+        }
+        // A non-cancelled order dated inside the range also makes this lead a Buyer
+        // for the range (even if its Won event is missing, or was logged on a
+        // different day than the order's date).
+        const matched = orderIdx ? ordersForLead(l, orderIdx) : [];
+        if (matched.length) {
+            if (st !== 'Won') st = 'Won';
+            boughtInRange = true;
+        }
         const { editHistory, ...rest } = l;
         out.push({
             ...rest,
             currentStatus: l.status,
+            statusAtEnd,
+            boughtInRange,
+            // Salespeople on the orders in range — lets the employee filter find a
+            // buyer whose lead is owned by someone else (e.g. admin keyed the order).
+            orderSalespersons: [...new Set(matched.map((o) => o.salesperson && String(o.salesperson)).filter(Boolean))],
             status: st,
-            buyerActivityInRange: start ? buyerChangedBetween(l, start, end) : false,
+            buyerActivityInRange: start ? (matched.length > 0 || buyerChangedBetween(l, start, end)) : false,
         });
     }
     return out;

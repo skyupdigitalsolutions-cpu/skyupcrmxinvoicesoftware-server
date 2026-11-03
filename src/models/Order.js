@@ -74,6 +74,8 @@ export { ORDER_STATUSES, DELIVERY_STATUSES };
 
 // Compound indexes
 orderSchema.index({ company: 1, createdAt: -1 });
+// Reports / buyer lookups filter orders by the order's own `date` within a company.
+orderSchema.index({ company: 1, date: -1 });
 orderSchema.index({ company: 1, status: 1, createdAt: -1 });
 orderSchema.index({ company: 1, salesperson: 1, createdAt: -1 });
 orderSchema.index({ company: 1, country: 1 });

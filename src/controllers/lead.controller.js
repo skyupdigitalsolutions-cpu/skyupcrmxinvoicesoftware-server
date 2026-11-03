@@ -158,7 +158,22 @@ export const listLeads = asyncHandler(async(req, res) => {
     if (req.query.asOf) {
         const withHist = {...projection, 'editHistory.at': 1, 'editHistory.changes': 1 };
         const raw = await Lead.find(q, withHist).sort({ createdAt: -1 }).lean();
-        const leads = applyAsOf(raw, { asOf: req.query.asOf, from: req.query.from, tz: req.query.tz });
+        // Non-cancelled orders dated inside [from, asOf] — compared by calendar day
+        // (the order form stores its "Order date" as a plain date), so the result
+        // doesn't shift with the viewer's timezone.
+        let orders = null;
+        const dayRe = /^\d{4}-\d{2}-\d{2}$/;
+        if (req.query.from && dayRe.test(req.query.from) && dayRe.test(req.query.asOf)) {
+            orders = await Order.find({
+                ...tenantScope(req),
+                status: { $ne: 'Cancelled' },
+                date: {
+                    $gte: new Date(`${req.query.from}T00:00:00.000Z`),
+                    $lte: new Date(`${req.query.asOf}T23:59:59.999Z`),
+                },
+            }).select('orderNo mobile country salesperson').lean();
+        }
+        const leads = applyAsOf(raw, { asOf: req.query.asOf, from: req.query.from, tz: req.query.tz, orders });
         return res.json({ success: true, leads });
     }
 
