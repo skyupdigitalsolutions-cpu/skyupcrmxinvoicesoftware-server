@@ -45,7 +45,9 @@ const ordersDb = [
 Order.find = () => ({ sort: async () => ordersDb });
 Lead.findOne = async (q) => store.find((l) => l.company === q.company && (q.mobileKey instanceof RegExp ? q.mobileKey.test(l.mobileKey) : l.mobileKey === q.mobileKey)) || null;
 Lead.updateOne = async (f, u) => { const l = store.find((x) => x._id === f._id); if (l.status === 'Won') return { modifiedCount: 0 }; Object.assign(l, u.$set); return { modifiedCount: 1 }; };
-Lead.create = async (d) => { const l = { _id: 'NEW' + store.length, ...d }; store.push(l); return l; };
+Lead.create = async (d) => { const l = { _id: 'NEW' + store.length, mobileKey: '971' + String(d.mobile).replace(/\D/g, ''), createdAt: Date.now(), ...d }; store.push(l); return l; };
+Lead.find = (q) => ({ sort: async () => store.filter((l) => l.company === q.company && l.mobileKey === q.mobileKey) });
+Lead.deleteOne = async () => ({ deletedCount: 1 });
 
 await ok('monthBounds', async () => {
   assert.equal(monthBounds('2026-11').start.toISOString(), '2026-11-01T00:00:00.000Z');

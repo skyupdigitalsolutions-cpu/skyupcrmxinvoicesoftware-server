@@ -182,3 +182,21 @@ export function overlayBuyers(leads, orders) {
         return { ...l, currentStatus: l.status, status: 'Won', boughtInRange: true, orderSalespersons };
     });
 }
+
+/**
+ * How this month's orders map onto the visible leads — shown on the Buyers card so a gap
+ * between "orders" and "buyers" is explained instead of mysterious.
+ *   orders        non-cancelled orders this month
+ *   customers     distinct leads that have at least one of them (= Buyers from orders)
+ *   withoutLead   orders that match no lead at all
+ */
+export function orderCoverage(leads, orders) {
+    const idx = indexBuyerOrders(orders || []);
+    const matched = new Set();
+    let customers = 0;
+    for (const l of leads) {
+        const m = ordersForLead(l, idx);
+        if (m.length) { customers += 1; m.forEach((o) => matched.add(o)); }
+    }
+    return { orders: (orders || []).length, customers, withoutLead: (orders || []).length - matched.size };
+}

@@ -6,7 +6,7 @@ import { Attendance } from '../models/Attendance.js';
 import { AttendanceConfig } from '../models/AttendanceConfig.js';
 import { User } from '../models/User.js';
 import { tenantScope, tenantCompanyId } from '../middleware/auth.js';
-import { statusAsOf, wonDates } from '../utils/leadStatusAt.js';
+import { statusAsOf, wonDates, applyAsOf } from '../utils/leadStatusAt.js';
 
 // A lead is a "buyer" while its status is Won. The monthly reset moves last
 // month's Buyers back to Opportunity, so this means "buyer in the CURRENT
@@ -702,17 +702,22 @@ export const monthlyComparison = asyncHandler(async (req, res) => {
         });
     }
 
+    // EVERY lead that existed by the end of the window (not only ones created inside it): a
+    // customer created in September who bought in October is an October Buyer.
     const leads = await Lead.find({
         ...scope,
-        createdAt: { $gte: months[0].start, $lte: months[months.length - 1].end },
-    }).select('status createdAt editHistory.at editHistory.changes').lean();
+        createdAt: { $lte: months[months.length - 1].end },
+    }).select('status createdAt mobileKey orderNo editHistory.at editHistory.changes').lean();
 
     // Orders & revenue per month (by order date) so the comparison covers sales,
-    // not just lead stages.
+    // not just lead stages. Non-cancelled orders also make their customer a Buyer for that month.
     const orderRows = await Order.find({
         ...scope,
         date: { $gte: months[0].start, $lte: months[months.length - 1].end },
-    }).select('date grandTotal').lean();
+    }).select('date grandTotal orderNo mobile country salesperson status').lean();
+
+    const pad = (n) => String(n).padStart(2, '0');
+    const ymd = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 
     const result = months.map(({ key, label, start, end }) => {
         const monthOrders = orderRows.filter((o) => {
@@ -721,14 +726,17 @@ export const monthlyComparison = asyncHandler(async (req, res) => {
         });
         const orders = monthOrders.length;
         const revenue = Number(monthOrders.reduce((s, o) => s + (o.grandTotal || 0), 0).toFixed(2));
-        // Leads created this month, with the stage they had at the END of that
-        // month (the current month uses today's status). Without this, last
-        // month's Buyers all collapsed into Opportunity after the monthly reset.
-        const monthLeads = withStatusAsOf(leads.filter(l => {
-            const t = new Date(l.createdAt).getTime();
-            return t >= start.getTime() && t <= end.getTime();
-        }), end);
-        const buyers      = monthLeads.filter(l => l.status === 'Won').length;
+
+        // Each lead's status at the END of this month (the current month uses today's status).
+        // Without this, last month's Buyers all collapsed into Opportunity after the monthly reset.
+        // Orders dated in the month also count their customer as a Buyer for it.
+        const from = ymd(start), to = ymd(end);
+        const buyerOrders = monthOrders.filter((o) => o.status !== 'Cancelled');
+        const asOfLeads = applyAsOf(leads, { asOf: to, from, tz: start.getTimezoneOffset(), orders: buyerOrders });
+
+        const createdIn = (l) => { const t = new Date(l.createdAt).getTime(); return t >= start.getTime() && t <= end.getTime(); };
+        const monthLeads = asOfLeads.filter(createdIn);                       // leads that arrived this month → stage mix + total
+        const buyers = asOfLeads.filter((l) => l.status === 'Won' && (createdIn(l) || l.buyerActivityInRange)).length; // + earlier leads who bought this month
         const opportunity = monthLeads.filter(l => l.status === 'Interested' || l.status === 'Contacted').length;
         const enquiry     = monthLeads.filter(l => l.status === 'Follow-up').length;
         const newLeads    = monthLeads.filter(l => l.status === 'New').length;

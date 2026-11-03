@@ -6,7 +6,7 @@ import { phoneSearchCandidates } from '../utils/phone.js';
 import { User } from '../models/User.js';
 import { Counter } from '../models/Counter.js';
 import { tenantScope, tenantCompanyId } from '../middleware/auth.js';
-import { findLeadForOrder, markLeadAsBuyer } from '../utils/orderBuyer.js';
+import { ensureBuyerForOrder } from '../utils/orderBuyer.js';
 
 // Scope = company (tenant) + role. Sales see only their own orders; admins see
 // their whole company; developer sees all (or one company via ?company=).
@@ -143,11 +143,11 @@ export const createOrder = asyncHandler(async(req, res) => {
     await order.save();
 
     // The customer becomes a Buyer as soon as the order exists — done here on the
-    // server so it no longer depends on the browser's follow-up call succeeding.
+    // server so it no longer depends on the browser's follow-up calls (lead lookup /
+    // lead creation / mark-buyer) succeeding. If the customer has no lead yet, one is created.
     // Non-fatal: the order is already saved.
     try {
-        const lead = await findLeadForOrder(order);
-        if (lead) await markLeadAsBuyer(lead, order, { byUser: req.user });
+        await ensureBuyerForOrder(order, { byUser: req.user });
     } catch (err) {
         console.error(`[order] #${order.orderNo}: could not mark lead as Buyer:`, err.message);
     }

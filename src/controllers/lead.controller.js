@@ -11,7 +11,7 @@ import { notifyUsers, adminsOf } from '../utils/notify.js';
 import { Cheque } from '../models/Cheque.js';
 import { WhatsAppMessage } from '../models/WhatsAppMessage.js';
 import { Notification } from '../models/Notification.js';
-import { applyAsOf, overlayBuyers } from '../utils/leadStatusAt.js';
+import { applyAsOf, overlayBuyers, orderCoverage } from '../utils/leadStatusAt.js';
 import { monthOrders, reconcileOrderBuyers } from '../utils/orderBuyer.js';
 
 // Human-readable labels for the fields we track edits on — used both in the
@@ -192,7 +192,10 @@ export const listLeads = asyncHandler(async(req, res) => {
     // in that month count as Buyers even if their stored status hasn't caught up.
     if (/^\d{4}-\d{2}$/.test(String(req.query.buyersMonth || ''))) {
         const orders = await monthOrders(req.query.buyersMonth, tenantCompanyId(req));
-        return res.json({ success: true, leads: overlayBuyers(leads, orders) });
+        // Coverage is only meaningful when this user sees every lead (admin), otherwise
+        // orders of other people's customers would look like "no lead".
+        const meta = req.user.role === 'sales' ? undefined : { month: req.query.buyersMonth, ...orderCoverage(leads, orders) };
+        return res.json({ success: true, leads: overlayBuyers(leads, orders), meta });
     }
     res.json({ success: true, leads });
 });
