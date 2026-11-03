@@ -164,3 +164,21 @@ export function applyAsOf(leads, { asOf, from, tz = 0, orders = null }) {
     }
     return out;
 }
+
+/**
+ * Default (no date filter) list view: a lead with a non-cancelled order dated in the current
+ * month counts as a Buyer even if its stored status hasn't caught up (the order form's
+ * follow-up call failed, the monthly reset ran early, …). The stored status stays available
+ * as `currentStatus`. Leads without such an order are returned untouched.
+ */
+export function overlayBuyers(leads, orders) {
+    if (!orders || !orders.length) return leads;
+    const idx = indexBuyerOrders(orders);
+    return leads.map((l) => {
+        const matched = ordersForLead(l, idx);
+        if (!matched.length) return l;
+        const orderSalespersons = [...new Set(matched.map((o) => o.salesperson && String(o.salesperson)).filter(Boolean))];
+        if (l.status === 'Won') return { ...l, orderSalespersons };
+        return { ...l, currentStatus: l.status, status: 'Won', boughtInRange: true, orderSalespersons };
+    });
+}

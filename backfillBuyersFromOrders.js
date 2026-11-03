@@ -42,70 +42,33 @@ const [Y, M] = monthStr.split('-').map(Number);
 const start = new Date(Date.UTC(Y, M - 1, 1));
 const end = new Date(Date.UTC(Y, M, 1));
 
-const { Order } = await import('./src/models/Order.js');
-const { Lead } = await import('./src/models/Lead.js');
-const { findLeadForOrder, markLeadAsBuyer } = await import('./src/utils/orderBuyer.js');
+const { reconcileOrderBuyers } = await import('./src/utils/orderBuyer.js');
 
 await mongoose.connect(uri, { serverSelectionTimeoutMS: 10000 });
 console.log(`✓ Connected: ${mongoose.connection.host}`);
 console.log(`Orders dated ${monthStr} (non-cancelled) — ${APPLY ? 'APPLYING CHANGES' : 'DRY RUN, nothing will be changed'}\n`);
 
-const orders = await Order.find({ date: { $gte: start, $lt: end }, status: { $ne: 'Cancelled' } }).sort({ date: 1, orderNo: 1 });
-const cache = new Map();           // lead id -> doc (so two orders from one customer are handled once)
-const tally = { total: orders.length, alreadyBuyer: 0, marked: 0, wouldMark: 0, noLead: 0, created: 0, errors: 0 };
+const { rows, summary } = await reconcileOrderBuyers({ month: monthStr, apply: APPLY, createMissing: CREATE });
 const pad = (s, n) => String(s ?? '').slice(0, n).padEnd(n);
-
+const LABEL = {
+  ok: (r) => `ok — "${r.leadName}" is already a Buyer`,
+  missing: (r) => `MISSING BUYER — "${r.leadName}" is still "${r.leadStatus}"`,
+  fixed: (r) => `FIXED — "${r.leadName}" is now a Buyer`,
+  no_lead: () => 'NO LEAD in CRM (no lead matches this phone number)',
+  created: (r) => `NO LEAD → lead "${r.leadName}" created as Buyer`,
+  error: (r) => `ERROR — ${r.error}`,
+};
 console.log(`${pad('ORDER', 7)}${pad('DATE', 11)}${pad('CUSTOMER', 28)}${pad('MOBILE', 16)}RESULT`);
-for (const o of orders) {
-  const head = `${pad('#' + o.orderNo, 7)}${pad(o.date.toISOString().slice(0, 10), 11)}${pad(o.customer, 28)}${pad(o.mobile, 16)}`;
-  try {
-    let lead = await findLeadForOrder(o);
-    if (lead) { const k = String(lead._id); lead = cache.get(k) || (cache.set(k, lead), lead); }
-
-    if (!lead) {
-      tally.noLead += 1;
-      if (APPLY && CREATE && (o.salesperson || o.createdBy)) {
-        await Lead.create({
-          company: o.company, name: o.customer, mobile: o.mobile, country: o.country || 'UAE', city: o.city || '',
-          delivery: o.delivery || '', source: 'Walk-in', status: 'Won', converted: true, orderNo: o.orderNo,
-          owner: o.salesperson || o.createdBy, ownerName: o.salespersonName || '',
-          remark: 'Auto-created from order backfill',
-          editHistory: [{ byName: 'Backfill from orders', at: o.createdAt, changes: [{ field: 'status', from: 'New', to: 'Won' }] }],
-        });
-        tally.created += 1; tally.noLead -= 1;
-        console.log(`${head}NO LEAD → lead created as Buyer`);
-      } else {
-        console.log(`${head}NO LEAD in CRM (no lead matches this phone number)`);
-      }
-      continue;
-    }
-
-    if (lead.status === 'Won') { tally.alreadyBuyer += 1; console.log(`${head}ok — "${lead.name}" is already a Buyer`); continue; }
-
-    if (APPLY) {
-      const prev = lead.status;
-      const changed = await markLeadAsBuyer(lead, o, { at: o.createdAt, byName: 'Backfill from orders' });
-      lead.status = 'Won';
-      if (changed) tally.marked += 1;
-      console.log(`${head}FIXED — "${lead.name}" was "${prev}" → now Buyer`);
-    } else {
-      tally.wouldMark += 1;
-      console.log(`${head}MISSING BUYER — "${lead.name}" is still "${lead.status}" (owner ${lead.ownerName || '?'})`);
-    }
-  } catch (e) {
-    tally.errors += 1;
-    console.log(`${head}ERROR — ${e.message}`);
-  }
-}
+rows.forEach((r) => console.log(`${pad('#' + r.orderNo, 7)}${pad(new Date(r.date).toISOString().slice(0, 10), 11)}${pad(r.customer, 28)}${pad(r.mobile, 16)}${LABEL[r.state](r)}`));
 
 console.log('\n── Summary ──');
-console.log(`Orders this month:        ${tally.total}`);
-console.log(`Already a Buyer:          ${tally.alreadyBuyer}`);
-if (APPLY) { console.log(`Marked as Buyer now:      ${tally.marked}`); if (CREATE) console.log(`Leads created:            ${tally.created}`); }
-else console.log(`Missing a Buyer (fixable): ${tally.wouldMark}`);
-console.log(`No lead in CRM:           ${tally.noLead}${tally.noLead && !CREATE ? '   (re-run with --apply --create-missing to add them)' : ''}`);
-if (tally.errors) console.log(`Errors:                   ${tally.errors}`);
-if (!APPLY && (tally.wouldMark || tally.noLead)) console.log('\nRe-run with --apply to fix the "MISSING BUYER" rows.');
+console.log(`Orders this month:          ${summary.orders}  (from ${summary.distinctCustomers} distinct CRM customers — several orders from one customer = one Buyer)`);
+console.log(`Already a Buyer:            ${summary.ok}`);
+if (APPLY) { console.log(`Marked as Buyer now:        ${summary.fixed}`); if (CREATE) console.log(`Leads created:              ${summary.created}`); }
+else console.log(`Missing a Buyer (fixable):  ${summary.missing}`);
+console.log(`No lead in CRM:             ${summary.noLead}${summary.noLead && !CREATE ? '   (re-run with --apply --create-missing to add them)' : ''}`);
+if (summary.errors) console.log(`Errors:                     ${summary.errors}`);
+if (!APPLY && (summary.missing || summary.noLead)) console.log('\nRe-run with --apply to fix the "MISSING BUYER" rows.');
 
 await mongoose.disconnect();
 process.exit(0);

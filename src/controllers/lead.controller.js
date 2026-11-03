@@ -11,7 +11,8 @@ import { notifyUsers, adminsOf } from '../utils/notify.js';
 import { Cheque } from '../models/Cheque.js';
 import { WhatsAppMessage } from '../models/WhatsAppMessage.js';
 import { Notification } from '../models/Notification.js';
-import { applyAsOf } from '../utils/leadStatusAt.js';
+import { applyAsOf, overlayBuyers } from '../utils/leadStatusAt.js';
+import { monthOrders, reconcileOrderBuyers } from '../utils/orderBuyer.js';
 
 // Human-readable labels for the fields we track edits on — used both in the
 // stored history and the admin notification text.
@@ -186,7 +187,32 @@ export const listLeads = asyncHandler(async(req, res) => {
     }
 
     const leads = await Lead.find(q, projection).sort({ createdAt: -1 }).lean();
+
+    // ?buyersMonth=YYYY-MM (sent by the Leads page, no date filter): leads with an order dated
+    // in that month count as Buyers even if their stored status hasn't caught up.
+    if (/^\d{4}-\d{2}$/.test(String(req.query.buyersMonth || ''))) {
+        const orders = await monthOrders(req.query.buyersMonth, tenantCompanyId(req));
+        return res.json({ success: true, leads: overlayBuyers(leads, orders) });
+    }
     res.json({ success: true, leads });
+});
+
+// ── Orders vs Buyers check / repair for a month (admin only) ─────────────────
+// GET  /leads/order-check?month=YYYY-MM         → report only
+// POST /leads/order-check { month, createMissing } → mark the matching leads as Buyers
+//      (current month only — a past month's buyers can't be created "now")
+const currentMonth = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
+export const orderCheck = asyncHandler(async(req, res) => {
+    const month = req.query.month || currentMonth();
+    if (!/^\d{4}-\d{2}$/.test(month)) throw new ApiError(400, 'month must look like 2026-11');
+    const result = await reconcileOrderBuyers({ month, company: tenantCompanyId(req) });
+    res.json({ success: true, month, ...result });
+});
+export const orderCheckFix = asyncHandler(async(req, res) => {
+    const month = req.body.month || currentMonth();
+    if (month !== currentMonth()) throw new ApiError(400, 'Buyers can only be repaired for the current month');
+    const result = await reconcileOrderBuyers({ month, company: tenantCompanyId(req), apply: true, createMissing: !!req.body.createMissing });
+    res.json({ success: true, month, ...result });
 });
 
 // ── Get single lead (owner OR any authenticated user — for cross-employee view) ──

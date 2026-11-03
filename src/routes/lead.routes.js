@@ -16,6 +16,8 @@ import {
     listDeletedContacts,
     listDuplicateLeads,
     mergeLeads,
+    orderCheck,
+    orderCheckFix,
 } from '../controllers/lead.controller.js';
 import { protect, authorize } from '../middleware/auth.js';
 
@@ -36,6 +38,10 @@ router.get('/deleted/report', authorize('admin'), listDeletedContacts);
 // Two-segment paths, declared before /:id so they aren't caught by the param route.
 router.get('/duplicates', authorize('admin'), listDuplicateLeads);
 router.post('/merge', authorize('admin'), mergeLeads);
+
+// ── Orders vs Buyers check / repair (admin only) — declared before /:id ──────
+router.get('/order-check', authorize('admin'), orderCheck);
+router.post('/order-check', authorize('admin'), orderCheckFix);
 
 // ── Bulk CSV import (one request for up to 2000 leads) ───────────────────────
 // Declared before /:id routes.
