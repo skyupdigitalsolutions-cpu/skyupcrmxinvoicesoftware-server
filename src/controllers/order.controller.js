@@ -6,7 +6,7 @@ import { phoneSearchCandidates } from '../utils/phone.js';
 import { User } from '../models/User.js';
 import { Counter } from '../models/Counter.js';
 import { tenantScope, tenantCompanyId } from '../middleware/auth.js';
-import { ensureBuyerForOrder } from '../utils/orderBuyer.js';
+import { ensureBuyerForOrder, revokeBuyerForCancelledOrder } from '../utils/orderBuyer.js';
 
 // Scope = company (tenant) + role. Sales see only their own orders; admins see
 // their whole company; developer sees all (or one company via ?company=).
@@ -200,6 +200,7 @@ export const updateStatus = asyncHandler(async(req, res) => {
         return res.json({ success: true, order });
     }
 
+    const wasCancelled = order.status === 'Cancelled';
     order.status = req.body.status;
     order.statusHistory.push({
         status: req.body.status,
@@ -208,6 +209,18 @@ export const updateStatus = asyncHandler(async(req, res) => {
         byName: req.user.name,
     });
     await order.save();
+
+    // Keep the customer's Buyer status in step with the order. Revenue needs no
+    // update here: every report skips Cancelled orders when summing grandTotal.
+    // Non-fatal: the status change is already saved.
+    const isCancelled = order.status === 'Cancelled';
+    try {
+        if (isCancelled && !wasCancelled) await revokeBuyerForCancelledOrder(order, { byUser: req.user });
+        else if (!isCancelled && wasCancelled) await ensureBuyerForOrder(order, { byUser: req.user });
+    } catch (err) {
+        console.error(`[order] #${order.orderNo}: could not update Buyer after status change:`, err.message);
+    }
+
     res.json({ success: true, order });
 });
 
@@ -215,6 +228,12 @@ export const deleteOrder = asyncHandler(async(req, res) => {
     const order = await Order.findOne({ _id: req.params.id, ...scopeFor(req) });
     if (!order) throw new ApiError(404, 'Order not found');
     if (order.status === 'Invoiced') throw new ApiError(400, 'Delete the invoice first');
+    const wasLive = order.status !== 'Cancelled';
     await order.deleteOne();
+    // A deleted order is no longer a purchase either — same Buyer clean-up as cancelling.
+    if (wasLive) {
+        try { await revokeBuyerForCancelledOrder(order, { byUser: req.user }); }
+        catch (err) { console.error(`[order] #${order.orderNo}: could not update Buyer after delete:`, err.message); }
+    }
     res.json({ success: true, message: 'Order deleted' });
 });

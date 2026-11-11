@@ -206,7 +206,9 @@ async function fetchReportData(companyId, date) {
     });
     const employees = Object.values(empMap).sort((a, b) => b.leads - a.leads);
 
-    const orderRevenue = dayOrders.reduce((s, o) => s + (o.grandTotal || 0), 0);
+    // Cancelled orders are not sales — leave them out of the count and revenue.
+    const liveOrders = dayOrders.filter((o) => o.status !== 'Cancelled');
+    const orderRevenue = liveOrders.reduce((s, o) => s + (o.grandTotal || 0), 0);
 
     return {
         summary: {
@@ -228,7 +230,7 @@ async function fetchReportData(companyId, date) {
             assignedUserName: l.ownerName || '—',
             status: l.status,
         })),
-        orders: { count: dayOrders.length, revenue: orderRevenue },
+        orders: { count: liveOrders.length, revenue: orderRevenue },
     };
 }
 

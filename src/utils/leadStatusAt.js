@@ -31,15 +31,42 @@ export function normalizeStatus(v) {
 }
 
 // Sorted (oldest first) list of {at, from, to} status transitions.
+//
+// A Won event whose order was later CANCELLED is voided by a `buyerVoid` change
+// (from = the Won event's timestamp; see revokeBuyerForCancelledOrder). Voided
+// events are removed, and the change right after one continues from the status
+// the lead had before it — so the lead reads as if it never became a Buyer.
 export function statusTimeline(lead) {
-    const out = [];
+    const raw = [];
+    const voided = new Set();
     for (const h of lead.editHistory || []) {
         for (const c of h.changes || []) {
+            if (c.field === 'buyerVoid') {
+                const t = new Date(c.from).getTime();
+                if (Number.isFinite(t)) voided.add(t);
+                continue;
+            }
             if (c.field !== 'status') continue;
-            out.push({ at: new Date(h.at), from: normalizeStatus(c.from), to: normalizeStatus(c.to) });
+            raw.push({ at: new Date(h.at), from: normalizeStatus(c.from), to: normalizeStatus(c.to) });
         }
     }
-    return out.sort((a, b) => a.at - b.at);
+    raw.sort((a, b) => a.at - b.at);
+    if (!voided.size) return raw;
+
+    const out = [];
+    let carry; // status before a voided Won, handed to the next change
+    for (const c of raw) {
+        if (c.to === 'Won' && c.from !== 'Won' && voided.has(c.at.getTime())) {
+            carry = c.from;
+            continue;
+        }
+        if (carry !== undefined) {
+            if (c.from === 'Won') c.from = carry;
+            carry = undefined;
+        }
+        out.push(c);
+    }
+    return out;
 }
 
 // Status of `lead` at the end of moment `asOf` (a Date). null = didn't exist yet.

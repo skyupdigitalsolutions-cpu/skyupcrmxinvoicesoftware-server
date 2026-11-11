@@ -65,6 +65,7 @@ export const getUserDetail = asyncHandler(async(req, res) => {
         Attendance.findOne({ user: user._id, company: user.company, date: todayStr() }).lean(),
         Order.aggregate([
             { $match: { salesperson: user._id, company: user.company } },
+            { $match: { status: { $ne: 'Cancelled' } } },   // cancelled orders are not sales
             { $group: { _id: null, n: { $sum: 1 }, revenue: { $sum: '$grandTotal' } } },
         ]),
         Lead.countDocuments({ owner: user._id, company: user.company }),

@@ -16,6 +16,10 @@ import { statusAsOf, wonDates, applyAsOf } from '../utils/leadStatusAt.js';
 // what it was on that date. This is the single source of truth.
 const isBuyer = (l) => l.status === 'Won';
 
+// A cancelled order is not a sale: it never counts towards revenue, due, units
+// or order totals (it still appears in status breakdowns / order lists).
+const isLiveOrder = (o) => o.status !== 'Cancelled';
+
 // Copy of each lead whose `status` is the one it had at the end of `until`.
 // Leads that didn't exist yet are dropped.
 const withStatusAsOf = (leads, until) =>
@@ -151,8 +155,9 @@ export const dashboard = asyncHandler(async(req, res) => {
         due = 0;
     orders.forEach((o) => {
         byStatus[o.status] = (byStatus[o.status] || 0) + 1;
+        if (!isLiveOrder(o)) return;
         byCountry[o.country] = (byCountry[o.country] || 0) + 1;
-        totalRevenue += o.grandTotal;
+        totalRevenue += o.grandTotal || 0;
         due += o.due || 0;
     });
 
@@ -228,7 +233,8 @@ export const dashboard = asyncHandler(async(req, res) => {
         success: true,
         deliveryByStage,
         stats: {
-            totalOrders: orders.length,
+            totalOrders: orders.filter(isLiveOrder).length,
+            cancelled: byStatus['Cancelled'] || 0,
             pending: byStatus['Pending'] || 0,
             delivered: byStatus['Delivered'] || 0,
             invoiced: byStatus['Invoiced'] || 0,
@@ -289,8 +295,9 @@ export const salesReport = asyncHandler(async(req, res) => {
         if (employeeName) invoiceMatch.salespersonName = employeeName;
     }
 
-    const orders = await Order.find(match);
+    const allOrders = await Order.find(match);
     const invoices = await Invoice.find(invoiceMatch);
+    const orders = allOrders.filter(isLiveOrder);
 
     const bySalespersonMap = {};
     const byCountry = {};
@@ -343,8 +350,9 @@ export const salesReport = asyncHandler(async(req, res) => {
         // Snapshot name = fallback for deleted users / ids that no longer resolve.
         if (!bySalespersonMap[key].snapshotName && rawName) bySalespersonMap[key].snapshotName = rawName;
         byCountry[o.country] = (byCountry[o.country] || 0) + o.grandTotal;
-        byStatus[o.status] = (byStatus[o.status] || 0) + 1;
     });
+    // Status breakdown still shows every order, cancelled ones included.
+    allOrders.forEach((o) => { byStatus[o.status] = (byStatus[o.status] || 0) + 1; });
 
     // Resolve each salesperson's CURRENT name after grouping, so a later
     // name/username change can't split them into two rows.
@@ -520,8 +528,9 @@ export const dailyReport = asyncHandler(async(req, res) => {
         delivery: o.delivery,
         payTerms: o.payTerms,
     }));
-    const ordersRevenue = dayOrders.reduce((s, o) => s + (o.grandTotal || 0), 0);
-    const ordersDue = dayOrders.reduce((s, o) => s + (o.due || 0), 0);
+    const liveDayOrders = dayOrders.filter(isLiveOrder);
+    const ordersRevenue = liveDayOrders.reduce((s, o) => s + (o.grandTotal || 0), 0);
+    const ordersDue = liveDayOrders.reduce((s, o) => s + (o.due || 0), 0);
 
     // ── Invoices raised on the day ──────────────────────────────────────────
     const invoices = dayInvoices.map((v) => ({
@@ -648,7 +657,7 @@ export const dailyReport = asyncHandler(async(req, res) => {
             callsMadeToday: callsToday,
             trendTotal: total - prevTotal,
             trendConverted: converted - prevConverted,
-            totalOrders: orders.length,
+            totalOrders: liveDayOrders.length,
             ordersRevenue: Number(ordersRevenue.toFixed(2)),
             ordersDue: Number(ordersDue.toFixed(2)),
             totalInvoices: invoices.length,
@@ -724,14 +733,14 @@ export const monthlyComparison = asyncHandler(async (req, res) => {
             const ts = new Date(o.date).getTime();
             return ts >= start.getTime() && ts <= end.getTime();
         });
-        const orders = monthOrders.length;
-        const revenue = Number(monthOrders.reduce((s, o) => s + (o.grandTotal || 0), 0).toFixed(2));
+        const buyerOrders = monthOrders.filter(isLiveOrder);
+        const orders = buyerOrders.length;
+        const revenue = Number(buyerOrders.reduce((s, o) => s + (o.grandTotal || 0), 0).toFixed(2));
 
         // Each lead's status at the END of this month (the current month uses today's status).
         // Without this, last month's Buyers all collapsed into Opportunity after the monthly reset.
         // Orders dated in the month also count their customer as a Buyer for it.
         const from = ymd(start), to = ymd(end);
-        const buyerOrders = monthOrders.filter((o) => o.status !== 'Cancelled');
         const asOfLeads = applyAsOf(leads, { asOf: to, from, tz: start.getTimezoneOffset(), orders: buyerOrders });
 
         const createdIn = (l) => { const t = new Date(l.createdAt).getTime(); return t >= start.getTime() && t <= end.getTime(); };

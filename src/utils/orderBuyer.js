@@ -8,6 +8,7 @@
  */
 import { Lead, normalizePhone } from '../models/Lead.js';
 import { Order } from '../models/Order.js';
+import { statusTimeline, normalizeStatus, indexBuyerOrders, ordersForLead } from './leadStatusAt.js';
 
 const esc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // Digits the user actually typed (the dial code that normalizePhone prepends must not count towards "long enough").
@@ -63,7 +64,9 @@ export async function markLeadAsBuyer(lead, order, { at = new Date(), byUser = n
     if (lead.status === 'Won') return false;
 
     const set = { status: 'Won', converted: true, orderNo: order.orderNo };
-    const changes = [{ field: 'status', from: lead.status, to: 'Won' }];
+    // The orderNo change tags this Won event with the order that caused it, so
+    // cancelling that order later can find and undo exactly this event.
+    const changes = [{ field: 'status', from: lead.status, to: 'Won' }, { field: 'orderNo', from: lead.orderNo ?? null, to: order.orderNo }];
 
     // The customer belongs to the salesperson on the order.
     if (order.salesperson && String(lead.owner) !== String(order.salesperson)) {
@@ -97,7 +100,7 @@ async function withLock(key, fn) {
 export async function createBuyerLeadForOrder(order, { at = new Date(), byName = 'Order created', byUser = null } = {}) {
     const owner = order.salesperson || order.createdBy || (byUser && byUser._id);
     if (!owner || !order.customer) return null;
-    const entry = { byName, at, changes: [{ field: 'status', from: 'New', to: 'Won' }] };
+    const entry = { byName, at, changes: [{ field: 'status', from: 'New', to: 'Won' }, { field: 'orderNo', from: null, to: order.orderNo }] };
     if (byUser && byUser._id) entry.by = byUser._id;
     return Lead.create({
         company: order.company, name: order.customer, mobile: order.mobile || '', country: order.country || 'UAE',
@@ -160,6 +163,90 @@ export async function ensureBuyerForOrder(order, { byUser = null } = {}) {
         if (!lead) return 'skipped';
     }
     return (await markLeadAsBuyer(lead, order, { byUser })) ? 'marked' : 'already';
+}
+
+// 'YYYY-MM' (UTC) of a date — orders store their date as UTC midnight of the calendar day.
+const monthKeyOf = (d) => { const x = new Date(d); return `${x.getUTCFullYear()}-${String(x.getUTCMonth() + 1).padStart(2, '0')}`; };
+
+/**
+ * Undo ensureBuyerForOrder when an order is CANCELLED.
+ *
+ * Previously cancelling only changed order.status, so the customer stayed a Buyer (Won)
+ * and every report kept counting them. Now:
+ *   - the Won event this order created is VOIDED (a `buyerVoid` change in editHistory), so
+ *     date-range / monthly reports stop counting it — even for a past month that the monthly
+ *     reset has already rolled over (see statusTimeline in leadStatusAt.js)
+ *   - if the lead is still Won because of this order, it goes back to the status it had
+ *     before it became a Buyer (falls back to 'Interested')
+ *   - `converted` / `orderNo` are updated to reflect the customer's remaining orders
+ * Nothing is reverted while the customer still has another live (non-cancelled) order in the
+ * same month — they are still a Buyer for that month.
+ * Returns 'reverted' | 'voided' | 'kept' | 'no_lead'.
+ */
+export async function revokeBuyerForCancelledOrder(order, { byUser = null } = {}) {
+    const lead = await findLeadForOrder(order);
+    if (!lead) return 'no_lead';
+
+    // The same customer's OTHER live orders (any date). Narrow by phone digits / orderNo in
+    // the query, then confirm with the same matching the reports use.
+    const tail = last9(lead.mobileKey) || typedDigits(order).slice(-9);
+    const or = [];
+    if (tail.length >= 7) or.push({ mobile: new RegExp(`${tail.split('').join('\\D*')}\\D*$`) });
+    if (lead.orderNo && lead.orderNo !== order.orderNo) or.push({ orderNo: lead.orderNo });
+    const candidates = or.length ?
+        await Order.find({ company: order.company, _id: { $ne: order._id }, status: { $ne: 'Cancelled' }, $or: or })
+            .select('orderNo mobile country date createdAt').lean() : [];
+    const others = ordersForLead(lead, indexBuyerOrders(candidates));
+    const hasOtherIn = (monthKey) => others.some((o) => monthKeyOf(o.date) === monthKey);
+
+    // Won events still in effect (already-voided ones are filtered out by statusTimeline).
+    const wins = statusTimeline(lead).filter((c) => c.to === 'Won' && c.from !== 'Won');
+    const lastWin = wins[wins.length - 1] || null;
+    // The Won event this order caused: tagged with an orderNo change (markLeadAsBuyer /
+    // createBuyerLeadForOrder); older history has no tag, so fall back to a Won logged
+    // within minutes of the order being saved.
+    const tagged = new Set();
+    for (const h of lead.editHistory || []) {
+        if ((h.changes || []).some((c) => c.field === 'orderNo' && Number(c.to) === Number(order.orderNo))) tagged.add(new Date(h.at).getTime());
+    }
+    const createdAt = new Date(order.createdAt || order.date).getTime();
+    const isThisOrdersWin = (w) => tagged.has(w.at.getTime()) ||
+        (w.at.getTime() >= createdAt - 5 * 60 * 1000 && w.at.getTime() <= createdAt + 10 * 60 * 1000);
+    const orderWin = [...wins].reverse().find(isThisOrdersWin) || null;
+
+    const changes = [];
+    const set = {};
+
+    // 1) Void this order's Won event unless another live order makes them a Buyer that month.
+    const voidWin = orderWin && !hasOtherIn(monthKeyOf(orderWin.at)) ? orderWin : null;
+    if (voidWin) changes.push({ field: 'buyerVoid', from: voidWin.at.toISOString(), to: order.orderNo });
+
+    // 2) Current status: only undo a Won that came from THIS order (never a manual Won, and
+    //    never while another live order this month keeps them a Buyer).
+    const wonFromThisOrder = (voidWin && voidWin === lastWin) || (!lastWin && lead.orderNo === order.orderNo);
+    if (lead.status === 'Won' && wonFromThisOrder && !hasOtherIn(monthKeyOf(new Date()))) {
+        let prev = normalizeStatus(lastWin && lastWin.from);
+        if (!prev || prev === 'Won') prev = 'Interested';
+        set.status = prev;
+        changes.push({ field: 'status', from: 'Won', to: prev });
+    }
+
+    // 3) Keep converted / orderNo in line with the orders that remain.
+    if (!others.length && lead.converted) set.converted = false;
+    if (lead.orderNo === order.orderNo) {
+        const latest = [...others].sort((a, b) => new Date(b.date) - new Date(a.date))[0];
+        set.orderNo = latest ? latest.orderNo : null;
+    }
+
+    if (!changes.length && !Object.keys(set).length) return 'kept';
+    const update = { $set: set };
+    if (changes.length) {
+        const entry = { byName: `${(byUser && byUser.name) || 'System'} (order #${order.orderNo} cancelled)`, at: new Date(), changes };
+        if (byUser && byUser._id) entry.by = byUser._id;
+        update.$push = { editHistory: entry };
+    }
+    await Lead.updateOne({ _id: lead._id }, update);
+    return set.status ? 'reverted' : (voidWin ? 'voided' : 'kept');
 }
 
 /** UTC [start, end) for 'YYYY-MM' — orders store their date as a plain calendar date (UTC midnight). */
