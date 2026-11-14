@@ -7,6 +7,7 @@ import { User } from '../models/User.js';
 import { Counter } from '../models/Counter.js';
 import { tenantScope, tenantCompanyId } from '../middleware/auth.js';
 import { ensureBuyerForOrder, revokeBuyerForCancelledOrder } from '../utils/orderBuyer.js';
+import { planTallyChange, saveWithTally } from '../utils/tallySync.js';
 
 // Scope = company (tenant) + role. Sales see only their own orders; admins see
 // their whole company; developer sees all (or one company via ?company=).
@@ -172,8 +173,11 @@ export const updateOrder = asyncHandler(async(req, res) => {
         }
     }
     order.recalc();
-    await order.save();
-    res.json({ success: true, order });
+    // Linked to Tally? Validate the change for Tally first, then queue it after saving.
+    const tallyArgs = { company: order.company, sourceType: 'SALES_ORDER', sourceId: order._id, action: 'edit', docAfter: order, user: req.user };
+    const tally = await planTallyChange(tallyArgs);
+    await saveWithTally({ plan: tally, replan: () => planTallyChange(tallyArgs), save: () => order.save() });
+    res.json({ success: true, order, ...(tally.summary ? { tally: tally.summary } : {}) });
 });
 
 // Tenant-wide: any authenticated user can update an order's status/delivery
@@ -208,7 +212,11 @@ export const updateStatus = asyncHandler(async(req, res) => {
         by: req.user._id,
         byName: req.user.name,
     });
-    await order.save();
+    // Cancel / un-cancel of an order linked to Tally is sent to Tally; other
+    // stage changes don't touch Tally (the planner returns a no-op).
+    const tallyArgs = { company: order.company, sourceType: 'SALES_ORDER', sourceId: order._id, action: 'status', docAfter: order, user: req.user };
+    const tally = await planTallyChange(tallyArgs);
+    await saveWithTally({ plan: tally, replan: () => planTallyChange(tallyArgs), save: () => order.save() });
 
     // Keep the customer's Buyer status in step with the order. Revenue needs no
     // update here: every report skips Cancelled orders when summing grandTotal.
@@ -229,7 +237,9 @@ export const deleteOrder = asyncHandler(async(req, res) => {
     if (!order) throw new ApiError(404, 'Order not found');
     if (order.status === 'Invoiced') throw new ApiError(400, 'Delete the invoice first');
     const wasLive = order.status !== 'Cancelled';
-    await order.deleteOne();
+    const tallyArgs = { company: order.company, sourceType: 'SALES_ORDER', sourceId: order._id, action: 'delete', docAfter: null, user: req.user };
+    const tally = await planTallyChange(tallyArgs);
+    await saveWithTally({ plan: tally, replan: () => planTallyChange(tallyArgs), save: () => order.deleteOne() });
     // A deleted order is no longer a purchase either — same Buyer clean-up as cancelling.
     if (wasLive) {
         try { await revokeBuyerForCancelledOrder(order, { byUser: req.user }); }

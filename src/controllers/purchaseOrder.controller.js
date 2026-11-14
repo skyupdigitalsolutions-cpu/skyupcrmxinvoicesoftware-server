@@ -4,6 +4,7 @@ import { ApiError }      from '../utils/ApiError.js';
 import { PurchaseOrder, PO_STATUSES, PO_PAY_STATUSES } from '../models/PurchaseOrder.js';
 import { Counter }       from '../models/Counter.js';
 import { tenantScope, tenantCompanyId } from '../middleware/auth.js';
+import { planTallyChange, saveWithTally } from '../utils/tallySync.js';
 
 // ── List ─────────────────────────────────────────────────────────────────────
 export const listPurchaseOrders = asyncHandler(async (req, res) => {
@@ -70,7 +71,9 @@ export const updatePurchaseOrder = asyncHandler(async (req, res) => {
   const fields = ['supplierName', 'supplierContact', 'city', 'country', 'paymentStatus', 'items', 'notes', 'date'];
   fields.forEach((f) => { if (req.body[f] !== undefined) po[f] = req.body[f]; });
   po.recalc();
-  await po.save();
+  const tallyArgs = { company: po.company, sourceType: 'PURCHASE_ORDER', sourceId: po._id, action: 'edit', docAfter: po, user: req.user };
+  const tally = await planTallyChange(tallyArgs);
+  await saveWithTally({ plan: tally, replan: () => planTallyChange(tallyArgs), save: () => po.save() });
   res.json({ success: true, purchaseOrder: po });
 });
 
@@ -82,7 +85,10 @@ export const setPurchaseOrderStatus = asyncHandler(async (req, res) => {
   const { status } = req.body;
   if (!PO_STATUSES.includes(status)) throw new ApiError(400, `Invalid status: ${status}`);
   po.status = status;
-  await po.save();
+  // Cancel / un-cancel of a PO linked to Tally is sent to Tally; other status changes are CRM-only.
+  const tallyArgs = { company: po.company, sourceType: 'PURCHASE_ORDER', sourceId: po._id, action: 'status', docAfter: po, user: req.user };
+  const tally = await planTallyChange(tallyArgs);
+  await saveWithTally({ plan: tally, replan: () => planTallyChange(tallyArgs), save: () => po.save() });
   res.json({ success: true, purchaseOrder: po });
 });
 
@@ -102,6 +108,8 @@ export const setPurchaseOrderPayment = asyncHandler(async (req, res) => {
 export const deletePurchaseOrder = asyncHandler(async (req, res) => {
   const po = await PurchaseOrder.findOne({ _id: req.params.id, ...tenantScope(req) });
   if (!po) throw new ApiError(404, 'Purchase order not found');
-  await po.deleteOne();
+  const tallyArgs = { company: po.company, sourceType: 'PURCHASE_ORDER', sourceId: po._id, action: 'delete', docAfter: null, user: req.user };
+  const tally = await planTallyChange(tallyArgs);
+  await saveWithTally({ plan: tally, replan: () => planTallyChange(tallyArgs), save: () => po.deleteOne() });
   res.json({ success: true, message: 'Purchase order deleted' });
 });

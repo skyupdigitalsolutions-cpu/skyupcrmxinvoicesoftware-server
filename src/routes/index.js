@@ -15,6 +15,7 @@ import chequeRoutes from './cheque.routes.js';
 import whatsappRoutes from './whatsapp.routes.js';
 import sensyRoutes from './sensy.routes.js';
 import purchaseOrderRoutes from './purchaseOrder.routes.js';
+import tallyRoutes from './tally.routes.js';
 
 const router = Router();
 router.get('/health', (_req, res) => res.json({ success: true, status: 'ok', time: new Date().toISOString() }));
@@ -35,4 +36,5 @@ router.use('/cheques', chequeRoutes);
 router.use('/whatsapp', whatsappRoutes);
 router.use('/sensy', sensyRoutes);
 router.use('/purchase-orders', purchaseOrderRoutes);
+router.use('/tally', tallyRoutes);
 export default router;
